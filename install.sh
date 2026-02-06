@@ -510,8 +510,16 @@ innodb_buffer_pool_size=$MYSQL_INNODB_BUFFER_POOL_SIZE
 innodb_log_file_size=256M
 innodb_flush_log_at_trx_commit=2
 max_connections=200
+# Padrão brasileiro: charset, collation e fuso horário
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci
+default-time-zone='-03:00'
+lc_time_names=pt_BR
+
+[client]
+default-character-set=utf8mb4
 MYSQLCNF
-        log_info "MySQL config: buffer pool ${MYSQL_INNODB_BUFFER_POOL_SIZE}"
+        log_info "MySQL config: buffer pool ${MYSQL_INNODB_BUFFER_POOL_SIZE}, locale BR (utf8mb4, America/Sao_Paulo)"
     }
     
     cat > $INSTALL_DIR/.env <<EOF
@@ -803,6 +811,7 @@ REDIS_EOF
     networks: 
       - traefik-net
     environment:
+      TZ: America/Sao_Paulo
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASS}
       MYSQL_DATABASE: wordpress
       MYSQL_USER: wordpress
