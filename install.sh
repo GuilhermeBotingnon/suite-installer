@@ -162,6 +162,7 @@ open_firewall_ports() {
     echo -e "  ${WHITE}22${NC}   SSH"
     echo -e "  ${WHITE}80${NC}   HTTP  (Let's Encrypt + redirect)"
     echo -e "  ${WHITE}443${NC}  HTTPS (tráfego principal + autenticação)"
+    echo -e "  ${WHITE}3306${NC} MySQL (Power BI / clientes externos)"
     echo -e "  ${WHITE}8080${NC} Admin (opcional)"
     echo -e "  ${WHITE}8081${NC} HTTP  alternativo (Traefik portas alt)"
     echo -e "  ${WHITE}8444${NC} HTTPS alternativo (Traefik portas alt)\n"
@@ -171,26 +172,28 @@ open_firewall_ports() {
         ufw allow 22/tcp comment 'SSH' 2>/dev/null || true
         ufw allow 80/tcp comment 'HTTP' 2>/dev/null || true
         ufw allow 443/tcp comment 'HTTPS' 2>/dev/null || true
+        ufw allow 3306/tcp comment 'MySQL' 2>/dev/null || true
         ufw allow 8080/tcp comment 'Admin' 2>/dev/null || true
         ufw allow 8081/tcp comment 'Traefik HTTP alt' 2>/dev/null || true
         ufw allow 8444/tcp comment 'Traefik HTTPS alt' 2>/dev/null || true
         ufw --force enable 2>/dev/null || true
         ufw reload 2>/dev/null || true
-        log_info "UFW: portas 22, 80, 443, 8080, 8081, 8444 liberadas"
+        log_info "UFW: portas 22, 80, 443, 3306, 8080, 8081, 8444 liberadas"
     elif command -v firewall-cmd >/dev/null 2>&1 && [ -r /run/firewalld ]; then
         log_info "Configurando firewalld..."
         firewall-cmd -q --permanent --add-service=ssh 2>/dev/null || true
         firewall-cmd -q --permanent --add-service=http 2>/dev/null || true
         firewall-cmd -q --permanent --add-service=https 2>/dev/null || true
+        firewall-cmd -q --permanent --add-port=3306/tcp 2>/dev/null || true
         firewall-cmd -q --permanent --add-port=8080/tcp 2>/dev/null || true
         firewall-cmd -q --permanent --add-port=8081/tcp 2>/dev/null || true
         firewall-cmd -q --permanent --add-port=8444/tcp 2>/dev/null || true
         firewall-cmd -q --reload 2>/dev/null || true
-        log_info "firewalld: portas 22, 80, 443, 8080, 8081, 8444 liberadas"
+        log_info "firewalld: portas 22, 80, 443, 3306, 8080, 8081, 8444 liberadas"
     else
         log_warn "Nenhum firewall (ufw/firewalld) detectado."
         echo -e "  ${YELLOW}No painel da VPS/cloud, libere:${NC}"
-        echo -e "  ${WHITE}TCP 22, 80, 443, 8080, 8081, 8444${NC}\n"
+        echo -e "  ${WHITE}TCP 22, 80, 443, 3306, 8080, 8081, 8444${NC}\n"
     fi
     sleep 1
 }
@@ -589,6 +592,8 @@ No firewall do provedor (Security Groups, Firewall, Network):
   TCP 22    – SSH (acesso ao servidor)
   TCP 80    – HTTP (Let's Encrypt + redirect para HTTPS)
   TCP 443   – HTTPS (tráfego principal e autenticação)
+  TCP 3306  – MySQL (Power BI, clientes e ferramentas externas)
+              (recomendado: restringir por IP no painel da VPS quando possível)
   TCP 8080  – Admin (opcional)
   TCP 8081  – HTTP alternativo (Traefik em portas alt)
   TCP 8444  – HTTPS alternativo (Traefik em portas alt)
@@ -634,7 +639,7 @@ Sem isso, o Traefik recebe Host(``) e dá "no domain was given".
 
 5. RESUMO RÁPIDO
 ────────────────────────────────────────────
-• Libere no painel: TCP 22, 80, 443, 8081, 8444 (e 8080 se usar).
+• Libere no painel: TCP 22, 80, 443, 3306 (MySQL), 8081, 8444 (e 8080 se usar).
 • Cloudflare: SSL Full ou Full (strict); proxy laranja se quiser passar pelo CF.
 • Erro "no domain was given": .env sem domínios ou deploy sem source .env (veja item 4).
 • Erro de rede: rode diagnose-docker-networks.sh e evite subnet em uso.
@@ -810,6 +815,11 @@ REDIS_EOF
     image: mysql:8.0
     networks: 
       - traefik-net
+    ports:
+      - target: 3306
+        published: 3306
+        protocol: tcp
+        mode: host
     environment:
       TZ: America/Sao_Paulo
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASS}
@@ -1366,7 +1376,9 @@ generate_report() {
     }
     
     [ "$NEED_MYSQL" = true ] && {
-        echo -e "MySQL: InnoDB buffer pool ${WHITE}${MYSQL_INNODB_BUFFER_POOL_SIZE}${NC}\n"
+        echo -e "MySQL: InnoDB buffer pool ${WHITE}${MYSQL_INNODB_BUFFER_POOL_SIZE}${NC}"
+        echo -e "  Acesso externo (Power BI / clientes): ${WHITE}Host = IP do servidor, Porta = 3306${NC}"
+        echo -e "  Root: senha em .env (MYSQL_ROOT_PASS). ${YELLOW}Libere a porta 3306 no firewall da VPS.${NC}\n"
     }
     
     echo -e "${CYAN}📁 ARQUIVOS${NC}"
@@ -1379,7 +1391,7 @@ generate_report() {
     
     echo -e "${CYAN}☁️  CLOUDFLARE E PORTAS (resumo)${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  No painel da VPS/cloud, libere: ${WHITE}TCP 22, 80, 443, 8081, 8444${NC} (e 8080 se usar)"
+    echo -e "  No painel da VPS/cloud, libere: ${WHITE}TCP 22, 80, 443, 3306 (MySQL), 8081, 8444${NC} (e 8080 se usar)"
     echo -e "  Cloudflare: SSL ${WHITE}Full${NC} ou ${WHITE}Full (strict)${NC}; Proxy ${WHITE}laranja${NC} (Proxied) ou cinza (DNS only)"
     echo -e "  Tutorial completo: ${WHITE}$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt${NC}\n"
     
@@ -1399,7 +1411,7 @@ generate_report() {
         echo -e "2. Ou configure DNS (Tipo A) para ${WHITE}${SERVER_IP}${NC} e use o proxy existente para rotear por host."
     else
         echo -e "1. No Cloudflare: proxy laranja (Proxied) ou cinza (DNS only); SSL Full ou Full (strict)"
-        echo -e "2. No painel da VPS/cloud: libere ${WHITE}TCP 22, 80, 443, 8081, 8444${NC} (sem isso não há autenticação/acesso)"
+        echo -e "2. No painel da VPS/cloud: libere ${WHITE}TCP 22, 80, 443, 3306 (MySQL), 8081, 8444${NC} (sem isso não há autenticação/acesso)"
         echo -e "3. Configure os registros DNS acima apontando para ${WHITE}${SERVER_IP}${NC}"
         [ "$TRAEFIK_ALT_PORTS" = true ] && echo -e "   ${YELLOW}Acesso direto (portas alt): http://${SERVER_IP}:8081 e https://${SERVER_IP}:8444${NC}"
     fi
