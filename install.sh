@@ -125,7 +125,8 @@ append_port_change() {
 
 extract_conflict_port_from_log() {
     local logfile="$1"
-    sed -n "s/.*port '\([0-9]\+\)' is already in use.*/\1/p" "$logfile" | head -n1
+    [ -r "$logfile" ] || return 0
+    sed -n "s/.*port '\([0-9]\+\)' is already in use.*/\1/p" "$logfile" 2>/dev/null | head -n1 || true
 }
 
 is_port_busy_on_host() {
@@ -136,9 +137,9 @@ is_port_busy_on_host() {
 is_port_busy_on_swarm() {
     local port="$1"
     local sid
-    for sid in $(docker service ls -q 2>/dev/null); do
-        docker service inspect "$sid" --format '{{range .Endpoint.Ports}}{{.PublishedPort}} {{end}}' 2>/dev/null
-    done | tr ' ' '\n' | grep -qx "$port"
+    for sid in $(docker service ls -q 2>/dev/null || true); do
+        docker service inspect "$sid" --format '{{range .Endpoint.Ports}}{{.PublishedPort}} {{end}}' 2>/dev/null || true
+    done | tr ' ' '\n' | grep -qx "$port" 2>/dev/null
 }
 
 find_next_free_port() {
@@ -292,7 +293,7 @@ ask_stack_name() {
     echo -e "Permitido: letras minúsculas, números, hífen e underscore.\n"
 
     while true; do
-        read -p "Nome da stack [${STACK_NAME}]: " INPUT_STACK
+        read -p "Nome da stack [${STACK_NAME}]: " INPUT_STACK || true
         INPUT_STACK=${INPUT_STACK:-$STACK_NAME}
         INPUT_STACK=$(echo "$INPUT_STACK" | tr '[:upper:]' '[:lower:]')
         if [[ "$INPUT_STACK" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
@@ -372,7 +373,7 @@ choose_existing_traefik_network() {
                 idx=$((idx + 1))
             done
         fi
-        read -p "Escolha a rede para conectar [1-${#shown[@]}, padrão: ${default_choice}]: " selected
+        read -p "Escolha a rede para conectar [1-${#shown[@]}, padrão: ${default_choice}]: " selected || true
         selected=${selected:-$default_choice}
         if [[ "$selected" =~ ^[0-9]+$ ]] && [ "$selected" -ge 1 ] && [ "$selected" -le "${#shown[@]}" ]; then
             TRAEFIK_EXTERNAL_NETWORK="${shown[$((selected - 1))]}"
@@ -462,11 +463,11 @@ ask_cleanup() {
         echo "1) 🔄 Reinstalar stack (zera volumes da stack)"
         echo "2) 🗑️  Limpeza total (REMOVE TUDO)"
         echo "3) ❌ Sair"
-        read -p "Opção [1-3]: " OPT
+        read -p "Opção [1-3]: " OPT || true
         
         case $OPT in
             2)
-                read -p "Digite 'APAGAR TUDO' para confirmar: " CONFIRM
+                read -p "Digite 'APAGAR TUDO' para confirmar: " CONFIRM || true
                 [ "$CONFIRM" == "APAGAR TUDO" ] && {
                     log_warn "Destruindo ambiente..."
                     docker stack rm "$STACK_NAME" 2>/dev/null || true
@@ -717,7 +718,7 @@ ask_traefik_mode() {
         echo -e "  (e) Usar proxy existente – stack sem Traefik, conecta na rede detectada"
         echo -e "  (s) Segundo Traefik em portas 8081/8444 – evita conflito com 80/443"
         echo -e "  (p) Traefik próprio em 80/443 – ignora o existente (pode conflitar)"
-        read -p "  Escolha [e/s/p, padrão: e]: " TRAEFIK_CHOICE
+        read -p "  Escolha [e/s/p, padrão: e]: " TRAEFIK_CHOICE || true
         TRAEFIK_CHOICE=${TRAEFIK_CHOICE:-e}
         case "$TRAEFIK_CHOICE" in
             [eE]) USE_EXISTING_TRAEFIK=true;  TRAEFIK_ALT_PORTS=false ;;
@@ -727,7 +728,7 @@ ask_traefik_mode() {
     else
         echo -e "  (n) Traefik próprio em 80/443 (padrão)"
         echo -e "  (s) Traefik em portas 8081/8444 (se 80/443 já estiverem em uso)"
-        read -p "  Já existe Traefik/Coolify aqui? [n/s, padrão: n]: " TRAEFIK_CHOICE
+        read -p "  Já existe Traefik/Coolify aqui? [n/s, padrão: n]: " TRAEFIK_CHOICE || true
         TRAEFIK_CHOICE=${TRAEFIK_CHOICE:-n}
         if [[ "$TRAEFIK_CHOICE" =~ ^[sS]$ ]]; then
             USE_EXISTING_TRAEFIK=false
@@ -793,7 +794,7 @@ selection_menu() {
         echo -e "\n${WHITE}0) Continuar com a instalação${NC}"
         echo -e "${RED}9) Sair${NC}\n"
         
-        read -p "Digite o número para ativar/desativar [0-9]: " OPT
+        read -p "Digite o número para ativar/desativar [0-9]: " OPT || true
         
         case $OPT in
             1) [ "$ENABLE_MINIO" = true ] && ENABLE_MINIO=false || ENABLE_MINIO=true ;;
@@ -824,7 +825,7 @@ collect_info() {
     
     [ -z "$BASE_DOMAIN" ] && {
         while true; do
-            read -p "🌐 Domínio base (ex: twobrain.com.br): " BASE_DOMAIN
+            read -p "🌐 Domínio base (ex: twobrain.com.br): " BASE_DOMAIN || true
             [[ "$BASE_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] && break
             echo -e "${RED}✗ Formato inválido. Use: empresa.com.br${NC}"
         done
@@ -836,13 +837,13 @@ collect_info() {
     echo -e "${WHITE}Pressione ENTER para usar o padrão.${NC}\n"
     
     echo -e "${CYAN}Portainer (obrigatório):${NC}"
-    read -p "  [padrão: portainer]: " SUB
+    read -p "  [padrão: portainer]: " SUB || true
     SUB=${SUB:-portainer}
     DOMAIN_PORTAINER="${SUB}.${BASE_DOMAIN}"
     echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_PORTAINER}${NC}\n"
     
     echo -e "${CYAN}Traefik Dashboard:${NC}"
-    read -p "  [padrão: traefik]: " SUB
+    read -p "  [padrão: traefik]: " SUB || true
     SUB=${SUB:-traefik}
     DOMAIN_TRAEFIK="${SUB}.${BASE_DOMAIN}"
     DOMAIN_TRAEFIK="${DOMAIN_TRAEFIK:-traefik.${BASE_DOMAIN}}"
@@ -850,17 +851,17 @@ collect_info() {
     
     [ "$ENABLE_MINIO" = true ] && {
         echo -e "${CYAN}MinIO Storage:${NC}"
-        read -p "  Console [padrão: minio]: " SUB; SUB=${SUB:-minio}
+        read -p "  Console [padrão: minio]: " SUB || true; SUB=${SUB:-minio}
         DOMAIN_MINIO_CONSOLE="${SUB}.${BASE_DOMAIN}"
-        read -p "  API S3 [padrão: s3]: " SUB; SUB=${SUB:-s3}
+        read -p "  API S3 [padrão: s3]: " SUB || true; SUB=${SUB:-s3}
         DOMAIN_MINIO_API="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_N8N" = true ] && {
         echo -e "${CYAN}N8N Automation:${NC}"
-        read -p "  Editor [padrão: n8n]: " SUB; SUB=${SUB:-n8n}
+        read -p "  Editor [padrão: n8n]: " SUB || true; SUB=${SUB:-n8n}
         DOMAIN_N8N="${SUB}.${BASE_DOMAIN}"
-        read -p "  Webhook [padrão: webhook]: " SUB; SUB=${SUB:-webhook}
+        read -p "  Webhook [padrão: webhook]: " SUB || true; SUB=${SUB:-webhook}
         DOMAIN_N8N_WEBHOOK="${SUB}.${BASE_DOMAIN}"
         echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_N8N}${NC}"
         echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_N8N_WEBHOOK}${NC}\n"
@@ -868,53 +869,53 @@ collect_info() {
     
     [ "$ENABLE_TYPEBOT" = true ] && {
         echo -e "${CYAN}Typebot:${NC}"
-        read -p "  Builder [padrão: typebot]: " SUB; SUB=${SUB:-typebot}
+        read -p "  Builder [padrão: typebot]: " SUB || true; SUB=${SUB:-typebot}
         DOMAIN_TYPEBOT="${SUB}.${BASE_DOMAIN}"
-        read -p "  Viewer [padrão: bot]: " SUB; SUB=${SUB:-bot}
+        read -p "  Viewer [padrão: bot]: " SUB || true; SUB=${SUB:-bot}
         DOMAIN_TYPEBOT_VIEWER="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_EVOLUTION" = true ] && {
         echo -e "${CYAN}Evolution API:${NC}"
-        read -p "  [padrão: evolution]: " SUB; SUB=${SUB:-evolution}
+        read -p "  [padrão: evolution]: " SUB || true; SUB=${SUB:-evolution}
         DOMAIN_EVOLUTION="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_WORDPRESS" = true ] && {
         echo -e "${CYAN}WordPress:${NC}"
-        read -p "  [padrão: wordpress]: " SUB; SUB=${SUB:-wordpress}
+        read -p "  [padrão: wordpress]: " SUB || true; SUB=${SUB:-wordpress}
         DOMAIN_WORDPRESS="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_RABBIT" = true ] && {
         echo -e "${CYAN}RabbitMQ:${NC}"
-        read -p "  [padrão: rabbit]: " SUB; SUB=${SUB:-rabbit}
+        read -p "  [padrão: rabbit]: " SUB || true; SUB=${SUB:-rabbit}
         DOMAIN_RABBIT="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_PGADMIN" = true ] && {
         echo -e "${CYAN}pgAdmin:${NC}"
-        read -p "  [padrão: pgadmin]: " SUB; SUB=${SUB:-pgadmin}
+        read -p "  [padrão: pgadmin]: " SUB || true; SUB=${SUB:-pgadmin}
         DOMAIN_PGADMIN="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_PMA" = true ] && {
         echo -e "${CYAN}phpMyAdmin:${NC}"
-        read -p "  [padrão: pma]: " SUB; SUB=${SUB:-pma}
+        read -p "  [padrão: pma]: " SUB || true; SUB=${SUB:-pma}
         DOMAIN_PMA="${SUB}.${BASE_DOMAIN}"
     }
     
     EMAIL_SSL=${EMAIL_SSL:-"admin@${BASE_DOMAIN}"}
-    read -p "Email SSL [$EMAIL_SSL]: " i; EMAIL_SSL=${i:-$EMAIL_SSL}
+    read -p "Email SSL [$EMAIL_SSL]: " i || true; EMAIL_SSL=${i:-$EMAIL_SSL}
     
     if [ "$ENABLE_TYPEBOT" = true ] || [ "$ENABLE_N8N" = true ] || [ "$ENABLE_WORDPRESS" = true ]; then
-        read -p "Configurar SMTP real? [s/N]: " s
+        read -p "Configurar SMTP real? [s/N]: " s || true
         [[ $s =~ ^[Ss]$ ]] && {
-            read -p "SMTP Host: " SMTP_HOST
-            read -p "SMTP Port [587]: " SMTP_PORT; SMTP_PORT=${SMTP_PORT:-587}
-            read -p "SMTP User: " SMTP_USER
-            read -sp "SMTP Pass: " SMTP_PASS; echo
-            read -p "SMTP From [$EMAIL_SSL]: " SMTP_FROM; SMTP_FROM=${SMTP_FROM:-$EMAIL_SSL}
+            read -p "SMTP Host: " SMTP_HOST || true
+            read -p "SMTP Port [587]: " SMTP_PORT || true; SMTP_PORT=${SMTP_PORT:-587}
+            read -p "SMTP User: " SMTP_USER || true
+            read -sp "SMTP Pass: " SMTP_PASS || true; echo
+            read -p "SMTP From [$EMAIL_SSL]: " SMTP_FROM || true; SMTP_FROM=${SMTP_FROM:-$EMAIL_SSL}
         } || {
             SMTP_HOST="smtp.fake.com"; SMTP_PORT="587"
             SMTP_USER="fake"; SMTP_PASS="fake"; SMTP_FROM="$EMAIL_SSL"
@@ -952,7 +953,7 @@ collect_info() {
         echo -e "\n${CYAN}MySQL InnoDB buffer (RAM para tabelas/cache)${NC}"
         echo -e "  RAM da máquina: ${WHITE}$((RAM_MB / 1024)) GB${NC} (50% = ${WHITE}$((AUTO_MB / 1024)) GB${NC})"
         echo -e "  (a) Automático 50% da RAM  (d) Valor definido"
-        read -p "  Escolha [a/d, padrão: a]: " MYSQL_RAM_OPT
+        read -p "  Escolha [a/d, padrão: a]: " MYSQL_RAM_OPT || true
         MYSQL_RAM_OPT=${MYSQL_RAM_OPT:-a}
         if [[ "$MYSQL_RAM_OPT" =~ ^[Dd]$ ]]; then
             # Opções pré-definidas compatíveis com a máquina (até 50%)
@@ -976,10 +977,10 @@ collect_info() {
                 i=$((i+1))
             done
             echo -e "    0) Digitar valor em MB"
-            read -p "  Número ou MB [padrão: 4096]: " choice
+            read -p "  Número ou MB [padrão: 4096]: " choice || true
             choice=${choice:-4096}
             if [ "$choice" = "0" ]; then
-                read -p "  Valor em MB: " MYSQL_BUFFER_MB
+                read -p "  Valor em MB: " MYSQL_BUFFER_MB || true
                 MYSQL_BUFFER_MB=${MYSQL_BUFFER_MB:-4096}
             else
                 n=1
@@ -1024,6 +1025,16 @@ generate_files() {
     
     mkdir -p $INSTALL_DIR/traefik
     touch $INSTALL_DIR/traefik/acme.json && chmod 600 $INSTALL_DIR/traefik/acme.json
+
+    # Domínios padrão para serviços habilitados (evita Host vazio no Traefik)
+    [ "$ENABLE_MINIO" = true ] && { DOMAIN_MINIO_CONSOLE=${DOMAIN_MINIO_CONSOLE:-minio.${BASE_DOMAIN}}; DOMAIN_MINIO_API=${DOMAIN_MINIO_API:-s3.${BASE_DOMAIN}}; }
+    [ "$ENABLE_N8N" = true ] && { DOMAIN_N8N=${DOMAIN_N8N:-n8n.${BASE_DOMAIN}}; DOMAIN_N8N_WEBHOOK=${DOMAIN_N8N_WEBHOOK:-webhook.${BASE_DOMAIN}}; }
+    [ "$ENABLE_TYPEBOT" = true ] && { DOMAIN_TYPEBOT=${DOMAIN_TYPEBOT:-typebot.${BASE_DOMAIN}}; DOMAIN_TYPEBOT_VIEWER=${DOMAIN_TYPEBOT_VIEWER:-bot.${BASE_DOMAIN}}; }
+    [ "$ENABLE_EVOLUTION" = true ] && DOMAIN_EVOLUTION=${DOMAIN_EVOLUTION:-evolution.${BASE_DOMAIN}}
+    [ "$ENABLE_WORDPRESS" = true ] && DOMAIN_WORDPRESS=${DOMAIN_WORDPRESS:-wordpress.${BASE_DOMAIN}}
+    [ "$ENABLE_RABBIT" = true ] && DOMAIN_RABBIT=${DOMAIN_RABBIT:-rabbit.${BASE_DOMAIN}}
+    [ "$ENABLE_PGADMIN" = true ] && DOMAIN_PGADMIN=${DOMAIN_PGADMIN:-pgadmin.${BASE_DOMAIN}}
+    [ "$ENABLE_PMA" = true ] && DOMAIN_PMA=${DOMAIN_PMA:-pma.${BASE_DOMAIN}}
     
     [ "$NEED_MYSQL" = true ] && {
         mkdir -p "$INSTALL_DIR/mysql/conf.d"
@@ -1044,6 +1055,28 @@ default-character-set=utf8mb4
 MYSQLCNF
         log_info "MySQL config: buffer pool ${MYSQL_INNODB_BUFFER_POOL_SIZE}, locale BR (utf8mb4, America/Sao_Paulo)"
     }
+
+    # Script de init do Postgres: cria usuários/bancos evolution e typebot na primeira subida (evita falha dos serviços)
+    if [ "$NEED_POSTGRES" = true ] && { [ "$ENABLE_EVOLUTION" = true ] || [ "$ENABLE_TYPEBOT" = true ]; }; then
+        mkdir -p "$INSTALL_DIR/postgres-init"
+        cat > "$INSTALL_DIR/postgres-init/01-extra-dbs.sh" <<'ENDINIT'
+#!/usr/bin/env bash
+set -e
+# Criar usuários e bancos para Evolution e Typebot (senhas via env do serviço postgres)
+if [ -n "$POSTGRES_EXTRA_EVO_PASS" ]; then
+  evo_esc="${POSTGRES_EXTRA_EVO_PASS//\'/\'\'}"
+  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE USER evolution WITH PASSWORD '${evo_esc}';" 2>/dev/null || true
+  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
+fi
+if [ -n "$POSTGRES_EXTRA_TYPEBOT_PASS" ]; then
+  tb_esc="${POSTGRES_EXTRA_TYPEBOT_PASS//\'/\'\'}"
+  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE USER typebot WITH PASSWORD '${tb_esc}';" 2>/dev/null || true
+  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
+fi
+ENDINIT
+        chmod +x "$INSTALL_DIR/postgres-init/01-extra-dbs.sh"
+        log_info "Init Postgres: evolution/typebot criados na primeira subida"
+    fi
     
     cat > $INSTALL_DIR/.env <<EOF
 BASE_DOMAIN=$BASE_DOMAIN
@@ -1187,9 +1220,11 @@ TUTORIAL_EOF
 
 generate_compose() {
     # Rede: proxy existente = external; nosso Traefik = rede no compose com subnet fixa (evita overlap com outras redes overlay)
-    # Conexões entre serviços usam ${STACK_NAME}_<serviço> (ex: twobrain_mysql) para múltiplas instalações no mesmo servidor.
+    # Comunicação entre serviços: SEMPRE use hostname ${STACK_NAME}_<serviço> (ex: twobrain_postgres, twobrain_redis).
+    # No Swarm o nome real do serviço é <stack>_<serviço>. Todas as labels traefik.swarm.network usam ${TRAEFIK_EXTERNAL_NETWORK}
+    # para funcionar tanto com Traefik próprio (rede da stack) quanto com Traefik externo (Coolify/etc).
     if [ "$USE_EXISTING_TRAEFIK" = true ]; then
-        cat > $INSTALL_DIR/docker-compose.yml <<NET_EXT_EOF
+        cat > $INSTALL_DIR/docker-compose.yml <<'NET_EXT_EOF'
 networks:
   traefik-net:
     external: true
@@ -1218,6 +1253,12 @@ volumes:
   redis_data:
   mysql_data:
   minio_data:
+  n8n_data:
+  evolution_data:
+  wordpress_data:
+  rabbitmq_data:
+  pgadmin_data:
+  typebot_data:
 
 services:
 COMPOSE_EOF
@@ -1323,6 +1364,18 @@ EOF
     else
         POSTGRES_PORTS_BLOCK=""
     fi
+    if [ "$ENABLE_EVOLUTION" = true ] || [ "$ENABLE_TYPEBOT" = true ]; then
+        POSTGRES_INIT_VOLUME="
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro"
+        POSTGRES_EXTRA_ENV=""
+        [ "$ENABLE_EVOLUTION" = true ] && POSTGRES_EXTRA_ENV="${POSTGRES_EXTRA_ENV}
+      POSTGRES_EXTRA_EVO_PASS: \${PG_PASS_EVO}"
+        [ "$ENABLE_TYPEBOT" = true ] && POSTGRES_EXTRA_ENV="${POSTGRES_EXTRA_ENV}
+      POSTGRES_EXTRA_TYPEBOT_PASS: \${PG_PASS_TYPEBOT}"
+    else
+        POSTGRES_INIT_VOLUME=""
+        POSTGRES_EXTRA_ENV=""
+    fi
     cat >> $INSTALL_DIR/docker-compose.yml <<PG_EOF
 
   postgres:
@@ -1333,9 +1386,9 @@ ${POSTGRES_PORTS_BLOCK}
     environment:
       POSTGRES_DB: n8n
       POSTGRES_USER: n8n_user
-      POSTGRES_PASSWORD: ${PG_PASS_N8N}
+      POSTGRES_PASSWORD: \${PG_PASS_N8N}${POSTGRES_EXTRA_ENV}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data${POSTGRES_INIT_VOLUME}
     deploy:
       mode: replicated
       replicas: 1
@@ -1464,6 +1517,8 @@ MINIO_EOF
         published: ${N8N_EDITOR_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - n8n_data:/home/node/.n8n
     environment:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
@@ -1522,6 +1577,8 @@ MINIO_EOF
         published: ${N8N_WEBHOOK_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - n8n_data:/home/node/.n8n
     environment:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
@@ -1562,6 +1619,8 @@ MINIO_EOF
     image: n8nio/n8n:stable
     networks: 
       - traefik-net
+    volumes:
+      - n8n_data:/home/node/.n8n
     environment:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
@@ -1611,11 +1670,14 @@ N8N_EOF
         published: ${EVOLUTION_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - evolution_data:/evolution/instances
     environment:
       SERVER_URL: https://${DOMAIN_EVOLUTION}
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      DATABASE_ENABLED: "true"
       DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: postgresql://evolution:\${PG_PASS_EVO}@\${STACK_NAME}_postgres:5432/evolution
+      DATABASE_CONNECTION_URI: postgresql://evolution:\${PG_PASS_EVO}@\${STACK_NAME}_postgres:5432/evolution?schema=public
       CACHE_REDIS_ENABLED: "true"
       CACHE_REDIS_URI: redis://:\${REDIS_PASSWORD}@\${STACK_NAME}_redis:6379/1
     deploy:
@@ -1644,6 +1706,8 @@ EVO_EOF
         published: ${TYPEBOT_BUILDER_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - typebot_data:/app/public/uploads
     environment:
       DATABASE_URL: postgresql://typebot:\${PG_PASS_TYPEBOT}@\${STACK_NAME}_postgres:5432/typebot
       NEXTAUTH_URL: https://${DOMAIN_TYPEBOT}
@@ -1678,6 +1742,8 @@ EVO_EOF
         published: ${TYPEBOT_VIEWER_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - typebot_data:/app/public/uploads
     environment:
       DATABASE_URL: postgresql://typebot:\${PG_PASS_TYPEBOT}@\${STACK_NAME}_postgres:5432/typebot
       NEXT_PUBLIC_VIEWER_URL: https://${DOMAIN_TYPEBOT_VIEWER}
@@ -1708,6 +1774,8 @@ TYPEBOT_EOF
         published: ${WORDPRESS_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - wordpress_data:/var/www/html
     environment:
       WORDPRESS_DB_HOST: \${STACK_NAME}_mysql
       WORDPRESS_DB_NAME: wordpress
@@ -1743,6 +1811,8 @@ WP_EOF
         published: ${RABBIT_MGMT_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS}
@@ -1772,6 +1842,8 @@ RABBIT_EOF
         published: ${PGADMIN_PUBLISHED_PORT}
         protocol: tcp
         mode: host
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: ${EMAIL_SSL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASS}
@@ -1828,9 +1900,33 @@ deploy_stack() {
     echo -e "${CYAN}      IMPLANTANDO STACK${NC}"
     echo -e "${CYAN}══════════════════════════════════${NC}\n"
     
-    cd $INSTALL_DIR
-    set -a; source .env 2>/dev/null || true; set +a
-    
+    cd "$INSTALL_DIR" || { log_error "Diretório $INSTALL_DIR não encontrado."; exit 1; }
+    set +e
+    set -a
+    source .env 2>/dev/null
+    local _src_rc=$?
+    set -a
+    set -e
+    if [ $_src_rc -ne 0 ]; then
+        log_error "Erro ao carregar .env (verifique se o arquivo existe e a sintaxe)."
+        exit 1
+    fi
+
+    # Variáveis obrigatórias para o compose (hostnames stack+serviço e rede Traefik)
+    if [ -z "$STACK_NAME" ]; then
+        log_error "STACK_NAME vazio no .env. Serviços usam \${STACK_NAME}_postgres, \${STACK_NAME}_redis, etc."
+        exit 1
+    fi
+    if [ -z "$TRAEFIK_EXTERNAL_NETWORK" ]; then
+        if [ "$USE_EXISTING_TRAEFIK" = true ]; then
+            log_error "TRAEFIK_EXTERNAL_NETWORK vazio. Defina no .env a rede do proxy (ex: traefik-net)."
+        else
+            export TRAEFIK_EXTERNAL_NETWORK="${STACK_NAME}_traefik-net"
+            log_info "TRAEFIK_EXTERNAL_NETWORK definido: ${TRAEFIK_EXTERNAL_NETWORK}"
+        fi
+        [ -z "$TRAEFIK_EXTERNAL_NETWORK" ] && exit 1
+    fi
+
     # Garantir que variáveis de domínio estão no ambiente (evita Host(``) e "no domain was given")
     if [ -z "$DOMAIN_PORTAINER" ]; then
         log_error "Variáveis de domínio vazias. Edite $INSTALL_DIR/.env e defina DOMAIN_PORTAINER, DOMAIN_N8N, etc., ou execute o instalador novamente."
@@ -1901,16 +1997,19 @@ deploy_stack() {
         sleep 10
         PG_CONTAINER=$(docker ps -q -f name="${STACK_NAME}_postgres" | head -n1)
         if [ -n "$PG_CONTAINER" ]; then
-            log_info "Criando bancos adicionais se necessário..."
+            log_info "Criando bancos adicionais se necessário (fallback para volume já existente)..."
             [ "$ENABLE_EVOLUTION" = true ] && {
-                docker exec $PG_CONTAINER psql -U n8n_user -d postgres -c "CREATE USER evolution WITH PASSWORD '$PG_PASS_EVO';" 2>/dev/null || true
-                docker exec $PG_CONTAINER psql -U n8n_user -d postgres -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE USER evolution WITH PASSWORD '$PG_PASS_EVO';" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
             }
             [ "$ENABLE_TYPEBOT" = true ] && {
-                docker exec $PG_CONTAINER psql -U n8n_user -d postgres -c "CREATE USER typebot WITH PASSWORD '$PG_PASS_TYPEBOT';" 2>/dev/null || true
-                docker exec $PG_CONTAINER psql -U n8n_user -d postgres -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE USER typebot WITH PASSWORD '$PG_PASS_TYPEBOT';" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
             }
         fi
+        # Reinicia Evolution/Typebot para reconectar aos bancos (útil quando init não rodou, ex.: volume já existia)
+        [ "$ENABLE_EVOLUTION" = true ] && docker service update --force "${STACK_NAME}_evolution" 2>/dev/null || true
+        [ "$ENABLE_TYPEBOT" = true ] && { docker service update --force "${STACK_NAME}_typebot-builder" 2>/dev/null || true; docker service update --force "${STACK_NAME}_typebot-viewer" 2>/dev/null || true; }
     fi
     
     log_info "Stack implantada com sucesso!"
@@ -1934,11 +2033,11 @@ LOG="/var/log/twobrain-maintenance.log"
 echo "=== TWOBRAIN Maintenance - $(date) ===" >> "$LOG"
 
 # Limpeza de memória cache
-FREE_MEM=$(awk '/^MemAvailable:/{a=$2} /^MemTotal:/{t=$2} END{print int(100*a/t)}' /proc/meminfo)
-if [ "$FREE_MEM" -lt 20 ]; then
+FREE_MEM=\$(awk '/^MemAvailable:/{a=\$2} /^MemTotal:/{t=\$2} END{print int(100*a/t)}' /proc/meminfo 2>/dev/null || echo "50")
+[ "\${FREE_MEM:-50}" -lt 20 ] 2>/dev/null && {
     sync; echo 3 > /proc/sys/vm/drop_caches
-    echo "  Cache limpo" >> "$LOG"
-fi
+    echo "  Cache limpo" >> "\$LOG"
+}
 
 # Limpeza Docker
 docker system prune -af --filter "until=24h" >> "$LOG" 2>&1
@@ -2001,12 +2100,15 @@ generate_report() {
     if [ "$USE_EXISTING_TRAEFIK" = true ]; then
         echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Usando Traefik/Coolify existente${NC} (stack sem serviço Traefik)"
         echo -e "${GREEN}✓${NC} Rede proxy: ${WHITE}${TRAEFIK_EXTERNAL_NETWORK}${NC}"
+        echo -e "${GREEN}✓${NC} Comunicação interna: hostnames ${WHITE}\${STACK_NAME}_<serviço>${NC} (ex: ${STACK_NAME}_postgres, ${STACK_NAME}_redis)"
     elif [ "$TRAEFIK_ALT_PORTS" = true ]; then
         echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Traefik em portas 8081 (HTTP) e 8444 (HTTPS)${NC}"
         echo -e "${GREEN}✓${NC} Rede da stack: ${WHITE}${STACK_NAME}_traefik-net${NC}"
+        echo -e "${GREEN}✓${NC} Comunicação interna: hostnames ${WHITE}\${STACK_NAME}_<serviço>${NC}"
     else
         echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Traefik próprio em 80/443${NC}"
         echo -e "${GREEN}✓${NC} Rede da stack: ${WHITE}${STACK_NAME}_traefik-net${NC}"
+        echo -e "${GREEN}✓${NC} Comunicação interna: hostnames ${WHITE}\${STACK_NAME}_<serviço>${NC} (ex: ${STACK_NAME}_postgres)"
     fi
     echo ""
     
@@ -2046,13 +2148,34 @@ generate_report() {
 
     [ "$ENABLE_MINIO" = true ] && {
         echo -e "${WHITE}MinIO Console${NC}: https://$DOMAIN_MINIO_CONSOLE"
+        echo -e "  • API S3:  ${WHITE}https://$DOMAIN_MINIO_API${NC}"
         echo -e "  • Usuário: ${WHITE}$MINIO_ROOT_USER${NC}"
         echo -e "  • Senha:   ${WHITE}$MINIO_ROOT_PASSWORD${NC}\n"
     }
 
+    [ "$ENABLE_N8N" = true ] && {
+        echo -e "${WHITE}N8N${NC}: https://$DOMAIN_N8N"
+        echo -e "  • Webhook: ${WHITE}https://$DOMAIN_N8N_WEBHOOK${NC}"
+        echo -e "  • Senha/usuário definidos no primeiro acesso"
+        echo -e "  • Chave criptografia (backup): ${WHITE}$N8N_KEY${NC}\n"
+    }
+
+    [ "$ENABLE_TYPEBOT" = true ] && {
+        echo -e "${WHITE}Typebot Builder${NC}: https://$DOMAIN_TYPEBOT"
+        echo -e "  • Viewer:  ${WHITE}https://$DOMAIN_TYPEBOT_VIEWER${NC}"
+        echo -e "  • Admin (login): ${WHITE}$EMAIL_SSL${NC}"
+        echo -e "  • ENCRYPTION_SECRET (backup): ${WHITE}$TYPEBOT_ENC_KEY${NC}\n"
+    }
+
     [ "$ENABLE_EVOLUTION" = true ] && {
         echo -e "${WHITE}Evolution API${NC}: https://$DOMAIN_EVOLUTION"
-        echo -e "  • API Key: ${WHITE}$EVO_API_KEY${NC}\n"
+        echo -e "  • API Key (Header Authorization): ${WHITE}$EVO_API_KEY${NC}\n"
+    }
+
+    [ "$ENABLE_WORDPRESS" = true ] && {
+        echo -e "${WHITE}WordPress${NC}: https://$DOMAIN_WORDPRESS"
+        echo -e "  • Instalação e senha de admin no primeiro acesso"
+        echo -e "  • DB: ${WHITE}wordpress${NC} | User: ${WHITE}wordpress${NC} | Pass: ${WHITE}$WP_DB_PASS${NC}\n"
     }
 
     [ "$ENABLE_RABBIT" = true ] && {
@@ -2112,7 +2235,7 @@ generate_report() {
     
     echo -e "${CYAN}📁 ARQUIVOS${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  Config: ${WHITE}$INSTALL_DIR/.env${NC}"
+    echo -e "  Config (todas as variáveis): ${WHITE}$INSTALL_DIR/.env${NC}"
     echo -e "  Compose: ${WHITE}$INSTALL_DIR/docker-compose.yml${NC}"
     echo -e "  Tutorial Cloudflare + portas: ${WHITE}$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt${NC}"
     echo -e "  Manutenção: ${WHITE}/usr/local/bin/twobrain-maintenance.sh${NC}"
