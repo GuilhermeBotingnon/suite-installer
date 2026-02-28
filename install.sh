@@ -47,6 +47,8 @@ PREVIOUS_INSTALL=false
 # Traefik: usar proxy existente (Coolify/etc) ou próprio (80/443 ou portas alternativas)
 USE_EXISTING_TRAEFIK=false
 TRAEFIK_ALT_PORTS=false
+# SSL: Let's Encrypt (ACME) ou certificado autoassinado (não exige porta 80)
+USE_SELF_SIGNED_CERT=false
 SWARM_ALREADY_ACTIVE=false
 INTEGRATE_WITH_EXISTING_SWARM=false
 EXPOSE_DB_PORTS=true
@@ -125,8 +127,29 @@ append_port_change() {
 
 extract_conflict_port_from_log() {
     local logfile="$1"
-    [ -r "$logfile" ] || return 0
-    sed -n "s/.*port '\([0-9]\+\)' is already in use.*/\1/p" "$logfile" 2>/dev/null | head -n1 || true
+    sed -n "s/.*port '\([0-9]\+\)' is already in use.*/\1/p" "$logfile" | head -n1
+}
+
+# Mostra as últimas linhas do log de deploy e dicas para erros conhecidos
+show_deploy_failure_reason() {
+    local logfile="$1"
+    echo -e "\n${RED}Últimas linhas do log de deploy:${NC}"
+    echo -e "${YELLOW}────────────────────────────────────────${NC}"
+    if [ -f "$logfile" ]; then
+        tail -n 40 "$logfile" | sed 's/^/  /'
+        if grep -q "Pool overlaps\|overlap" "$logfile" 2>/dev/null; then
+            echo -e "\n${YELLOW}Dica:${NC} Conflito de rede (Pool overlaps). Rode diagnose-docker-networks.sh e use outra subnet no compose."
+        fi
+        if grep -q "network.*not found\|Could not find network" "$logfile" 2>/dev/null; then
+            echo -e "\n${YELLOW}Dica:${NC} Rede não encontrada. Confira TRAEFIK_EXTERNAL_NETWORK no .env ou use o Traefik próprio da stack."
+        fi
+        if grep -q "invalid yaml\|yaml: unmarshal\|parsing error" "$logfile" 2>/dev/null; then
+            echo -e "\n${YELLOW}Dica:${NC} Erro no YAML do docker-compose. Pode ser variável não substituída (ex: \$.env não carregado)."
+        fi
+    else
+        echo -e "  (arquivo não encontrado: $logfile)"
+    fi
+    echo -e "${YELLOW}────────────────────────────────────────${NC}\n"
 }
 
 is_port_busy_on_host() {
@@ -137,9 +160,9 @@ is_port_busy_on_host() {
 is_port_busy_on_swarm() {
     local port="$1"
     local sid
-    for sid in $(docker service ls -q 2>/dev/null || true); do
-        docker service inspect "$sid" --format '{{range .Endpoint.Ports}}{{.PublishedPort}} {{end}}' 2>/dev/null || true
-    done | tr ' ' '\n' | grep -qx "$port" 2>/dev/null
+    for sid in $(docker service ls -q 2>/dev/null); do
+        docker service inspect "$sid" --format '{{range .Endpoint.Ports}}{{.PublishedPort}} {{end}}' 2>/dev/null
+    done | tr ' ' '\n' | grep -qx "$port"
 }
 
 find_next_free_port() {
@@ -293,7 +316,7 @@ ask_stack_name() {
     echo -e "Permitido: letras minúsculas, números, hífen e underscore.\n"
 
     while true; do
-        read -p "Nome da stack [${STACK_NAME}]: " INPUT_STACK || true
+        read -p "Nome da stack [${STACK_NAME}]: " INPUT_STACK
         INPUT_STACK=${INPUT_STACK:-$STACK_NAME}
         INPUT_STACK=$(echo "$INPUT_STACK" | tr '[:upper:]' '[:lower:]')
         if [[ "$INPUT_STACK" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
@@ -373,7 +396,7 @@ choose_existing_traefik_network() {
                 idx=$((idx + 1))
             done
         fi
-        read -p "Escolha a rede para conectar [1-${#shown[@]}, padrão: ${default_choice}]: " selected || true
+        read -p "Escolha a rede para conectar [1-${#shown[@]}, padrão: ${default_choice}]: " selected
         selected=${selected:-$default_choice}
         if [[ "$selected" =~ ^[0-9]+$ ]] && [ "$selected" -ge 1 ] && [ "$selected" -le "${#shown[@]}" ]; then
             TRAEFIK_EXTERNAL_NETWORK="${shown[$((selected - 1))]}"
@@ -463,11 +486,11 @@ ask_cleanup() {
         echo "1) 🔄 Reinstalar stack (zera volumes da stack)"
         echo "2) 🗑️  Limpeza total (REMOVE TUDO)"
         echo "3) ❌ Sair"
-        read -p "Opção [1-3]: " OPT || true
+        read -p "Opção [1-3]: " OPT
         
         case $OPT in
             2)
-                read -p "Digite 'APAGAR TUDO' para confirmar: " CONFIRM || true
+                read -p "Digite 'APAGAR TUDO' para confirmar: " CONFIRM
                 [ "$CONFIRM" == "APAGAR TUDO" ] && {
                     log_warn "Destruindo ambiente..."
                     docker stack rm "$STACK_NAME" 2>/dev/null || true
@@ -478,7 +501,7 @@ ask_cleanup() {
                     done
                     # Remove rede da stack anterior (não remove rede compartilhada de outro proxy)
                     docker network rm "${STACK_NAME}_traefik-net" 2>/dev/null || true
-                    rm -rf $INSTALL_DIR
+                    rm -rf "$INSTALL_DIR"
                     docker system prune -af --volumes
                     PREVIOUS_INSTALL=false
                     log_info "Ambiente limpo"
@@ -488,7 +511,7 @@ ask_cleanup() {
             3) exit 0 ;;
         esac
     else
-        mkdir -p $INSTALL_DIR
+        mkdir -p "$INSTALL_DIR"
     fi
 }
 
@@ -718,7 +741,7 @@ ask_traefik_mode() {
         echo -e "  (e) Usar proxy existente – stack sem Traefik, conecta na rede detectada"
         echo -e "  (s) Segundo Traefik em portas 8081/8444 – evita conflito com 80/443"
         echo -e "  (p) Traefik próprio em 80/443 – ignora o existente (pode conflitar)"
-        read -p "  Escolha [e/s/p, padrão: e]: " TRAEFIK_CHOICE || true
+        read -p "  Escolha [e/s/p, padrão: e]: " TRAEFIK_CHOICE
         TRAEFIK_CHOICE=${TRAEFIK_CHOICE:-e}
         case "$TRAEFIK_CHOICE" in
             [eE]) USE_EXISTING_TRAEFIK=true;  TRAEFIK_ALT_PORTS=false ;;
@@ -728,7 +751,7 @@ ask_traefik_mode() {
     else
         echo -e "  (n) Traefik próprio em 80/443 (padrão)"
         echo -e "  (s) Traefik em portas 8081/8444 (se 80/443 já estiverem em uso)"
-        read -p "  Já existe Traefik/Coolify aqui? [n/s, padrão: n]: " TRAEFIK_CHOICE || true
+        read -p "  Já existe Traefik/Coolify aqui? [n/s, padrão: n]: " TRAEFIK_CHOICE
         TRAEFIK_CHOICE=${TRAEFIK_CHOICE:-n}
         if [[ "$TRAEFIK_CHOICE" =~ ^[sS]$ ]]; then
             USE_EXISTING_TRAEFIK=false
@@ -794,7 +817,7 @@ selection_menu() {
         echo -e "\n${WHITE}0) Continuar com a instalação${NC}"
         echo -e "${RED}9) Sair${NC}\n"
         
-        read -p "Digite o número para ativar/desativar [0-9]: " OPT || true
+        read -p "Digite o número para ativar/desativar [0-9]: " OPT
         
         case $OPT in
             1) [ "$ENABLE_MINIO" = true ] && ENABLE_MINIO=false || ENABLE_MINIO=true ;;
@@ -825,7 +848,7 @@ collect_info() {
     
     [ -z "$BASE_DOMAIN" ] && {
         while true; do
-            read -p "🌐 Domínio base (ex: twobrain.com.br): " BASE_DOMAIN || true
+            read -p "🌐 Domínio base (ex: twobrain.com.br): " BASE_DOMAIN
             [[ "$BASE_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] && break
             echo -e "${RED}✗ Formato inválido. Use: empresa.com.br${NC}"
         done
@@ -837,13 +860,13 @@ collect_info() {
     echo -e "${WHITE}Pressione ENTER para usar o padrão.${NC}\n"
     
     echo -e "${CYAN}Portainer (obrigatório):${NC}"
-    read -p "  [padrão: portainer]: " SUB || true
+    read -p "  [padrão: portainer]: " SUB
     SUB=${SUB:-portainer}
     DOMAIN_PORTAINER="${SUB}.${BASE_DOMAIN}"
     echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_PORTAINER}${NC}\n"
     
     echo -e "${CYAN}Traefik Dashboard:${NC}"
-    read -p "  [padrão: traefik]: " SUB || true
+    read -p "  [padrão: traefik]: " SUB
     SUB=${SUB:-traefik}
     DOMAIN_TRAEFIK="${SUB}.${BASE_DOMAIN}"
     DOMAIN_TRAEFIK="${DOMAIN_TRAEFIK:-traefik.${BASE_DOMAIN}}"
@@ -851,17 +874,17 @@ collect_info() {
     
     [ "$ENABLE_MINIO" = true ] && {
         echo -e "${CYAN}MinIO Storage:${NC}"
-        read -p "  Console [padrão: minio]: " SUB || true; SUB=${SUB:-minio}
+        read -p "  Console [padrão: minio]: " SUB; SUB=${SUB:-minio}
         DOMAIN_MINIO_CONSOLE="${SUB}.${BASE_DOMAIN}"
-        read -p "  API S3 [padrão: s3]: " SUB || true; SUB=${SUB:-s3}
+        read -p "  API S3 [padrão: s3]: " SUB; SUB=${SUB:-s3}
         DOMAIN_MINIO_API="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_N8N" = true ] && {
         echo -e "${CYAN}N8N Automation:${NC}"
-        read -p "  Editor [padrão: n8n]: " SUB || true; SUB=${SUB:-n8n}
+        read -p "  Editor [padrão: n8n]: " SUB; SUB=${SUB:-n8n}
         DOMAIN_N8N="${SUB}.${BASE_DOMAIN}"
-        read -p "  Webhook [padrão: webhook]: " SUB || true; SUB=${SUB:-webhook}
+        read -p "  Webhook [padrão: webhook]: " SUB; SUB=${SUB:-webhook}
         DOMAIN_N8N_WEBHOOK="${SUB}.${BASE_DOMAIN}"
         echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_N8N}${NC}"
         echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_N8N_WEBHOOK}${NC}\n"
@@ -869,53 +892,69 @@ collect_info() {
     
     [ "$ENABLE_TYPEBOT" = true ] && {
         echo -e "${CYAN}Typebot:${NC}"
-        read -p "  Builder [padrão: typebot]: " SUB || true; SUB=${SUB:-typebot}
+        read -p "  Builder [padrão: typebot]: " SUB; SUB=${SUB:-typebot}
         DOMAIN_TYPEBOT="${SUB}.${BASE_DOMAIN}"
-        read -p "  Viewer [padrão: bot]: " SUB || true; SUB=${SUB:-bot}
+        read -p "  Viewer [padrão: bot]: " SUB; SUB=${SUB:-bot}
         DOMAIN_TYPEBOT_VIEWER="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_EVOLUTION" = true ] && {
         echo -e "${CYAN}Evolution API:${NC}"
-        read -p "  [padrão: evolution]: " SUB || true; SUB=${SUB:-evolution}
+        read -p "  [padrão: evolution]: " SUB; SUB=${SUB:-evolution}
         DOMAIN_EVOLUTION="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_WORDPRESS" = true ] && {
         echo -e "${CYAN}WordPress:${NC}"
-        read -p "  [padrão: wordpress]: " SUB || true; SUB=${SUB:-wordpress}
+        read -p "  [padrão: wordpress]: " SUB; SUB=${SUB:-wordpress}
         DOMAIN_WORDPRESS="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_RABBIT" = true ] && {
         echo -e "${CYAN}RabbitMQ:${NC}"
-        read -p "  [padrão: rabbit]: " SUB || true; SUB=${SUB:-rabbit}
+        read -p "  [padrão: rabbit]: " SUB; SUB=${SUB:-rabbit}
         DOMAIN_RABBIT="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_PGADMIN" = true ] && {
         echo -e "${CYAN}pgAdmin:${NC}"
-        read -p "  [padrão: pgadmin]: " SUB || true; SUB=${SUB:-pgadmin}
+        read -p "  [padrão: pgadmin]: " SUB; SUB=${SUB:-pgadmin}
         DOMAIN_PGADMIN="${SUB}.${BASE_DOMAIN}"
     }
     
     [ "$ENABLE_PMA" = true ] && {
         echo -e "${CYAN}phpMyAdmin:${NC}"
-        read -p "  [padrão: pma]: " SUB || true; SUB=${SUB:-pma}
+        read -p "  [padrão: pma]: " SUB; SUB=${SUB:-pma}
         DOMAIN_PMA="${SUB}.${BASE_DOMAIN}"
     }
     
     EMAIL_SSL=${EMAIL_SSL:-"admin@${BASE_DOMAIN}"}
-    read -p "Email SSL [$EMAIL_SSL]: " i || true; EMAIL_SSL=${i:-$EMAIL_SSL}
+    read -p "Email SSL [$EMAIL_SSL]: " i; EMAIL_SSL=${i:-$EMAIL_SSL}
+    
+    if [ "$USE_EXISTING_TRAEFIK" != true ]; then
+        echo -e "\n${CYAN}Certificado SSL (HTTPS):${NC}"
+        echo -e "  (1) Let's Encrypt – gratuito, exige porta 80 acessível da internet"
+        echo -e "  (2) Autoassinado – sem necessidade de porta 80 (navegador mostrará aviso de segurança)"
+        SSL_DEFAULT="${USE_SELF_SIGNED_CERT:-false}"
+        [ "$SSL_DEFAULT" = true ] && SSL_DEFAULT=2 || SSL_DEFAULT=1
+        read -p "  Escolha [1/2, padrão: $SSL_DEFAULT]: " SSL_CHOICE
+        SSL_CHOICE=${SSL_CHOICE:-$SSL_DEFAULT}
+        if [[ "$SSL_CHOICE" =~ ^2$ ]]; then
+            USE_SELF_SIGNED_CERT=true
+            log_info "Certificado autoassinado será gerado para *.$BASE_DOMAIN"
+        else
+            USE_SELF_SIGNED_CERT=false
+        fi
+    fi
     
     if [ "$ENABLE_TYPEBOT" = true ] || [ "$ENABLE_N8N" = true ] || [ "$ENABLE_WORDPRESS" = true ]; then
-        read -p "Configurar SMTP real? [s/N]: " s || true
+        read -p "Configurar SMTP real? [s/N]: " s
         [[ $s =~ ^[Ss]$ ]] && {
-            read -p "SMTP Host: " SMTP_HOST || true
-            read -p "SMTP Port [587]: " SMTP_PORT || true; SMTP_PORT=${SMTP_PORT:-587}
-            read -p "SMTP User: " SMTP_USER || true
-            read -sp "SMTP Pass: " SMTP_PASS || true; echo
-            read -p "SMTP From [$EMAIL_SSL]: " SMTP_FROM || true; SMTP_FROM=${SMTP_FROM:-$EMAIL_SSL}
+            read -p "SMTP Host: " SMTP_HOST
+            read -p "SMTP Port [587]: " SMTP_PORT; SMTP_PORT=${SMTP_PORT:-587}
+            read -p "SMTP User: " SMTP_USER
+            read -sp "SMTP Pass: " SMTP_PASS; echo
+            read -p "SMTP From [$EMAIL_SSL]: " SMTP_FROM; SMTP_FROM=${SMTP_FROM:-$EMAIL_SSL}
         } || {
             SMTP_HOST="smtp.fake.com"; SMTP_PORT="587"
             SMTP_USER="fake"; SMTP_PASS="fake"; SMTP_FROM="$EMAIL_SSL"
@@ -953,7 +992,7 @@ collect_info() {
         echo -e "\n${CYAN}MySQL InnoDB buffer (RAM para tabelas/cache)${NC}"
         echo -e "  RAM da máquina: ${WHITE}$((RAM_MB / 1024)) GB${NC} (50% = ${WHITE}$((AUTO_MB / 1024)) GB${NC})"
         echo -e "  (a) Automático 50% da RAM  (d) Valor definido"
-        read -p "  Escolha [a/d, padrão: a]: " MYSQL_RAM_OPT || true
+        read -p "  Escolha [a/d, padrão: a]: " MYSQL_RAM_OPT
         MYSQL_RAM_OPT=${MYSQL_RAM_OPT:-a}
         if [[ "$MYSQL_RAM_OPT" =~ ^[Dd]$ ]]; then
             # Opções pré-definidas compatíveis com a máquina (até 50%)
@@ -977,10 +1016,10 @@ collect_info() {
                 i=$((i+1))
             done
             echo -e "    0) Digitar valor em MB"
-            read -p "  Número ou MB [padrão: 4096]: " choice || true
+            read -p "  Número ou MB [padrão: 4096]: " choice
             choice=${choice:-4096}
             if [ "$choice" = "0" ]; then
-                read -p "  Valor em MB: " MYSQL_BUFFER_MB || true
+                read -p "  Valor em MB: " MYSQL_BUFFER_MB
                 MYSQL_BUFFER_MB=${MYSQL_BUFFER_MB:-4096}
             else
                 n=1
@@ -1007,6 +1046,9 @@ collect_info() {
 generate_files() {
     print_header
     log_info "Gerando configurações..."
+
+    # Diretórios: INSTALL_DIR e subpastas (traefik, mysql/conf.d) criados aqui; permissões: .env 600, acme 600, certs 644, compose e tutorial 644
+    mkdir -p "$INSTALL_DIR"
     
     # Garantir que variáveis de domínio estão definidas (evita Host(``) no Traefik)
     if [ -z "$BASE_DOMAIN" ] || [ -z "$DOMAIN_PORTAINER" ]; then
@@ -1023,18 +1065,39 @@ generate_files() {
         log_info "Dashboard Traefik: ${DOMAIN_TRAEFIK}"
     fi
     
-    mkdir -p $INSTALL_DIR/traefik
-    touch $INSTALL_DIR/traefik/acme.json && chmod 600 $INSTALL_DIR/traefik/acme.json
+    mkdir -p "$INSTALL_DIR/traefik"
+    if [ "$USE_SELF_SIGNED_CERT" = true ]; then
+        # Exige domínio válido (ex: exemplo.com) para o certificado
+        if [ -z "$BASE_DOMAIN" ] || [[ ! "$BASE_DOMAIN" =~ \.. ]]; then
+            log_error "BASE_DOMAIN inválido ou vazio ($BASE_DOMAIN). Use um domínio como meusite.com.br para gerar o certificado."
+            exit 1
+        fi
+        CERT_CRT="$INSTALL_DIR/traefik/selfsigned.crt"
+        CERT_KEY="$INSTALL_DIR/traefik/selfsigned.key"
+        log_info "Gerando certificado autoassinado para *.$BASE_DOMAIN e $BASE_DOMAIN..."
+        if openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+            -keyout "$CERT_KEY" -out "$CERT_CRT" \
+            -subj "/CN=*.$BASE_DOMAIN" \
+            -addext "subjectAltName=DNS:*.$BASE_DOMAIN,DNS:$BASE_DOMAIN" 2>/dev/null; then
+            :
+        else
+            openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
+                -keyout "$CERT_KEY" -out "$CERT_CRT" \
+                -subj "/CN=*.$BASE_DOMAIN"
+        fi
+        chmod 644 "$CERT_CRT" "$CERT_KEY"
+        if [ ! -s "$CERT_CRT" ] || [ ! -s "$CERT_KEY" ]; then
+            log_error "Falha ao gerar certificado. Verifique se o openssl está instalado e se $INSTALL_DIR/traefik é gravável."
+            exit 1
+        fi
+        log_info "Certificado salvo em $CERT_CRT e $CERT_KEY"
+    else
+        touch "$INSTALL_DIR/traefik/acme.json"
+        chmod 600 "$INSTALL_DIR/traefik/acme.json"
+    fi
 
-    # Domínios padrão para serviços habilitados (evita Host vazio no Traefik)
-    [ "$ENABLE_MINIO" = true ] && { DOMAIN_MINIO_CONSOLE=${DOMAIN_MINIO_CONSOLE:-minio.${BASE_DOMAIN}}; DOMAIN_MINIO_API=${DOMAIN_MINIO_API:-s3.${BASE_DOMAIN}}; }
-    [ "$ENABLE_N8N" = true ] && { DOMAIN_N8N=${DOMAIN_N8N:-n8n.${BASE_DOMAIN}}; DOMAIN_N8N_WEBHOOK=${DOMAIN_N8N_WEBHOOK:-webhook.${BASE_DOMAIN}}; }
-    [ "$ENABLE_TYPEBOT" = true ] && { DOMAIN_TYPEBOT=${DOMAIN_TYPEBOT:-typebot.${BASE_DOMAIN}}; DOMAIN_TYPEBOT_VIEWER=${DOMAIN_TYPEBOT_VIEWER:-bot.${BASE_DOMAIN}}; }
-    [ "$ENABLE_EVOLUTION" = true ] && DOMAIN_EVOLUTION=${DOMAIN_EVOLUTION:-evolution.${BASE_DOMAIN}}
-    [ "$ENABLE_WORDPRESS" = true ] && DOMAIN_WORDPRESS=${DOMAIN_WORDPRESS:-wordpress.${BASE_DOMAIN}}
-    [ "$ENABLE_RABBIT" = true ] && DOMAIN_RABBIT=${DOMAIN_RABBIT:-rabbit.${BASE_DOMAIN}}
-    [ "$ENABLE_PGADMIN" = true ] && DOMAIN_PGADMIN=${DOMAIN_PGADMIN:-pgadmin.${BASE_DOMAIN}}
-    [ "$ENABLE_PMA" = true ] && DOMAIN_PMA=${DOMAIN_PMA:-pma.${BASE_DOMAIN}}
+    # Rede no .env deve bater com a stack (compose usa ${STACK_NAME}_traefik-net no deploy)
+    [ "$USE_EXISTING_TRAEFIK" != true ] && TRAEFIK_EXTERNAL_NETWORK="${STACK_NAME}_traefik-net"
     
     [ "$NEED_MYSQL" = true ] && {
         mkdir -p "$INSTALL_DIR/mysql/conf.d"
@@ -1055,30 +1118,8 @@ default-character-set=utf8mb4
 MYSQLCNF
         log_info "MySQL config: buffer pool ${MYSQL_INNODB_BUFFER_POOL_SIZE}, locale BR (utf8mb4, America/Sao_Paulo)"
     }
-
-    # Script de init do Postgres: cria usuários/bancos evolution e typebot na primeira subida (evita falha dos serviços)
-    if [ "$NEED_POSTGRES" = true ] && { [ "$ENABLE_EVOLUTION" = true ] || [ "$ENABLE_TYPEBOT" = true ]; }; then
-        mkdir -p "$INSTALL_DIR/postgres-init"
-        cat > "$INSTALL_DIR/postgres-init/01-extra-dbs.sh" <<'ENDINIT'
-#!/usr/bin/env bash
-set -e
-# Criar usuários e bancos para Evolution e Typebot (senhas via env do serviço postgres)
-if [ -n "$POSTGRES_EXTRA_EVO_PASS" ]; then
-  evo_esc="${POSTGRES_EXTRA_EVO_PASS//\'/\'\'}"
-  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE USER evolution WITH PASSWORD '${evo_esc}';" 2>/dev/null || true
-  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
-fi
-if [ -n "$POSTGRES_EXTRA_TYPEBOT_PASS" ]; then
-  tb_esc="${POSTGRES_EXTRA_TYPEBOT_PASS//\'/\'\'}"
-  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE USER typebot WITH PASSWORD '${tb_esc}';" 2>/dev/null || true
-  psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
-fi
-ENDINIT
-        chmod +x "$INSTALL_DIR/postgres-init/01-extra-dbs.sh"
-        log_info "Init Postgres: evolution/typebot criados na primeira subida"
-    fi
     
-    cat > $INSTALL_DIR/.env <<EOF
+    cat > "$INSTALL_DIR/.env" <<EOF
 BASE_DOMAIN=$BASE_DOMAIN
 EMAIL_SSL=$EMAIL_SSL
 TRAEFIK_PASS=$TRAEFIK_PASS
@@ -1100,6 +1141,7 @@ STACK_NAME=$STACK_NAME
 TRAEFIK_EXTERNAL_NETWORK=$TRAEFIK_EXTERNAL_NETWORK
 TRAEFIK_SECURE_ENTRYPOINT=$TRAEFIK_SECURE_ENTRYPOINT
 TRAEFIK_CERTRESOLVER_NAME=$TRAEFIK_CERTRESOLVER_NAME
+USE_SELF_SIGNED_CERT=$USE_SELF_SIGNED_CERT
 INTEGRATE_WITH_EXISTING_SWARM=$INTEGRATE_WITH_EXISTING_SWARM
 EXPOSE_DB_PORTS=$EXPOSE_DB_PORTS
 TRAEFIK_HTTP_PORT=$TRAEFIK_HTTP_PORT
@@ -1148,13 +1190,18 @@ ENABLE_PMA=$ENABLE_PMA
 USE_EXISTING_TRAEFIK=$USE_EXISTING_TRAEFIK
 TRAEFIK_ALT_PORTS=$TRAEFIK_ALT_PORTS
 EOF
+    chmod 600 "$INSTALL_DIR/.env"
 
     generate_compose
     write_cloudflare_tutorial
+
+    chmod 644 "$INSTALL_DIR/docker-compose.yml" 2>/dev/null || true
+    [ -f "$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt" ] && chmod 644 "$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt" 2>/dev/null || true
 }
 
 # Tutorial: Cloudflare e portas (gravado em $INSTALL_DIR para o cliente)
 write_cloudflare_tutorial() {
+    mkdir -p "$INSTALL_DIR"
     TUT="$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt"
     cat > "$TUT" <<'TUTORIAL_EOF'
 ═══════════════════════════════════════════════════════════════
@@ -1201,30 +1248,56 @@ e você não consegue acessar nem autenticar.
 
 4. DEPLOY MANUAL (sempre carregue o .env)
 ────────────────────────────────────────────
-Se rodar "docker stack deploy" à mão, as variáveis de domínio vêm do .env.
-Sem isso, o Traefik recebe Host(``) e dá "no domain was given".
+Se rodar "docker stack deploy" à mão, as variáveis vêm do .env.
+Sem source .env: Traefik recebe Host(``), rede errada (ex: botinho_traefik-net) e Evolution/Prisma falha na URL do banco.
 
   cd /opt/stack
   set -a && source .env && set +a
-  docker stack deploy -c docker-compose.yml <nome-da-stack>
+  docker stack deploy -c docker-compose.yml $STACK_NAME
 
-5. RESUMO RÁPIDO
+  (Use o mesmo nome da stack que está em STACK_NAME no .env.)
+
+5. RATE LIMIT LETS ENCRYPT (429)
+────────────────────────────────────────────
+"Muitas autorizações falharam" = limite de tentativas por domínio/hora.
+Aguarde o retry-after indicado no erro (ex: 1h). Corrija antes: porta 80 acessível, DNS apontando para o IP, firewall liberado.
+
+6. "Timeout during connect (likely firewall problem)"
+────────────────────────────────────────────
+O Let's Encrypt precisa acessar http://SEU-DOMINIO/.well-known/acme-challenge/... na porta 80
+a partir da internet. Se der timeout:
+
+  a) Porta 80 no PAINEL DA VPS/CLOUD (obrigatório)
+     – Security Groups, Firewall, Network: libere TCP 80 (e 443) para 0.0.0.0/0 ou seu IP.
+     – Só UFW/firewalld no servidor não basta; o provedor (AWS, GCP, OVH, etc.) pode bloquear antes.
+
+  b) DNS
+     – Cada subdomínio (docker., automation., webhook., pma., whatsapp., etc.) em Tipo A para o IP do servidor.
+     – No Cloudflare: pode usar Proxied (laranja); o CF encaminha para sua origem na 80/443.
+
+  c) Teste rápido (no seu PC ou outro servidor):
+     curl -I http://SEU-DOMINIO/.well-known/acme-challenge/test
+     Deve chegar ao Traefik (resposta 404 é OK); timeout = firewall/DNS bloqueando.
+
+7. RESUMO RÁPIDO
 ────────────────────────────────────────────
 • Libere no painel exatamente as portas mostradas no passo de firewall do instalador.
 • Cloudflare: SSL Full ou Full (strict); proxy laranja se quiser passar pelo CF.
 • Erro "no domain was given": .env sem domínios ou deploy sem source .env (veja item 4).
 • Erro de rede: rode diagnose-docker-networks.sh e evite subnet em uso.
+• Rede "Could not find network named X": o .env deve ter STACK_NAME e TRAEFIK_EXTERNAL_NETWORK corretos; rede real é <stack>_traefik-net.
+• Certificado "Timeout during connect": libere TCP 80 (e 443) no painel do provedor da VPS; confira item 6 acima.
 TUTORIAL_EOF
     log_info "Tutorial gravado: $TUT"
 }
 
 generate_compose() {
-    # Rede: proxy existente = external; nosso Traefik = rede no compose com subnet fixa (evita overlap com outras redes overlay)
-    # Comunicação entre serviços: SEMPRE use hostname ${STACK_NAME}_<serviço> (ex: twobrain_postgres, twobrain_redis).
-    # No Swarm o nome real do serviço é <stack>_<serviço>. Todas as labels traefik.swarm.network usam ${TRAEFIK_EXTERNAL_NETWORK}
-    # para funcionar tanto com Traefik próprio (rede da stack) quanto com Traefik externo (Coolify/etc).
+    # Heredocs: <<'TAG' = literal no arquivo (${VAR} substituído no deploy). <<TAG sem aspas = expande no script.
+    # Senhas e comando Redis: expandidas no script (PG_PASS_N8N, REDIS_PASS, MYSQL_ROOT_PASS, WP_DB_PASS) para não quebrar se o deploy não carregar .env.
+    # Rede: proxy existente = external; nosso Traefik = rede no compose com subnet fixa (evita overlap).
+    # Conexões entre serviços: ${STACK_NAME}_<serviço> para múltiplas instalações no mesmo servidor.
     if [ "$USE_EXISTING_TRAEFIK" = true ]; then
-        cat > $INSTALL_DIR/docker-compose.yml <<'NET_EXT_EOF'
+        cat > "$INSTALL_DIR/docker-compose.yml" <<'NET_EXT_EOF'
 networks:
   traefik-net:
     external: true
@@ -1233,7 +1306,7 @@ networks:
 NET_EXT_EOF
     else
         # Rede criada pela stack com subnet fixa (evita overlap com outras redes overlay já existentes)
-        cat > $INSTALL_DIR/docker-compose.yml <<'NET_INT_EOF'
+        cat > "$INSTALL_DIR/docker-compose.yml" <<'NET_INT_EOF'
 networks:
   traefik-net:
     driver: overlay
@@ -1245,7 +1318,7 @@ networks:
 NET_INT_EOF
     fi
 
-    cat >> $INSTALL_DIR/docker-compose.yml <<'COMPOSE_EOF'
+    cat >> "$INSTALL_DIR/docker-compose.yml" <<'COMPOSE_EOF'
 volumes:
   traefik_certs:
   portainer_data:
@@ -1253,22 +1326,16 @@ volumes:
   redis_data:
   mysql_data:
   minio_data:
-  n8n_data:
-  evolution_data:
-  wordpress_data:
-  rabbitmq_data:
-  pgadmin_data:
-  typebot_data:
 
 services:
 COMPOSE_EOF
 
     # Traefik: só inclui se NÃO for usar proxy existente (Coolify)
     # Portas em mode: host = abre direto no host, sem usar rede de publicação do Swarm (evita "Pool overlaps")
+    # Rede e Host usam variáveis (${STACK_NAME}_traefik-net, ${DOMAIN_TRAEFIK}) para substituição no deploy a partir do .env
     if [ "$USE_EXISTING_TRAEFIK" != true ]; then
-        # Rede criada pela stack = <stack>_traefik-net (nome real no Swarm)
-        TRAEFIK_SWARM_NET="${STACK_NAME}_traefik-net"
-        cat >> $INSTALL_DIR/docker-compose.yml <<TRAEFIK_EOF
+        if [ "$USE_SELF_SIGNED_CERT" = true ]; then
+            cat >> "$INSTALL_DIR/docker-compose.yml" <<'TRAEFIK_SELF_EOF'
 
   traefik:
     image: traefik:latest
@@ -1276,11 +1343,11 @@ COMPOSE_EOF
       - traefik-net
     ports:
       - target: 80
-        published: $TRAEFIK_HTTP_PORT
+        published: ${TRAEFIK_HTTP_PORT}
         protocol: tcp
         mode: host
       - target: 443
-        published: $TRAEFIK_HTTPS_PORT
+        published: ${TRAEFIK_HTTPS_PORT}
         protocol: tcp
         mode: host
     command:
@@ -1289,12 +1356,68 @@ COMPOSE_EOF
       - --providers.docker=false
       - --providers.swarm=true
       - --providers.swarm.exposedbydefault=false
-      - --providers.swarm.network=$TRAEFIK_SWARM_NET
+      - --providers.swarm.network=${STACK_NAME}_traefik-net
       - --entrypoints.web.address=:80
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
       - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.le.acme.email=\${EMAIL_SSL}
+      - --entrypoints.websecure.tls.defaultCertificate.certfile=/certs/selfsigned.crt
+      - --entrypoints.websecure.tls.defaultCertificate.keyfile=/certs/selfsigned.key
+      - --log.level=INFO
+      - --accesslog=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - './traefik:/certs:ro'
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.traefik.rule=Host(`${DOMAIN_TRAEFIK}`)'
+      - 'traefik.http.routers.traefik.service=api@internal'
+      - 'traefik.http.routers.traefik.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}'
+      - 'traefik.http.routers.traefik.middlewares=redirect-to-dashboard,auth'
+      - 'traefik.http.middlewares.redirect-to-dashboard.redirectregex.regex=^https?://([^/]+)/?$$'
+      - 'traefik.http.middlewares.redirect-to-dashboard.redirectregex.replacement=https://$${1}/dashboard/'
+      - 'traefik.http.middlewares.redirect-to-dashboard.redirectregex.permanent=true'
+      - 'traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_AUTH}'
+      - 'traefik.http.services.dummy-svc.loadbalancer.server.port=9999'
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+TRAEFIK_SELF_EOF
+        else
+            cat >> "$INSTALL_DIR/docker-compose.yml" <<'TRAEFIK_EOF'
+
+  traefik:
+    image: traefik:latest
+    networks:
+      - traefik-net
+    ports:
+      - target: 80
+        published: ${TRAEFIK_HTTP_PORT}
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: ${TRAEFIK_HTTPS_PORT}
+        protocol: tcp
+        mode: host
+    command:
+      - --api.dashboard=true
+      - --api.insecure=false
+      - --providers.docker=false
+      - --providers.swarm=true
+      - --providers.swarm.exposedbydefault=false
+      - --providers.swarm.network=${STACK_NAME}_traefik-net
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${EMAIL_SSL}
       - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.le.acme.httpchallenge=true
       - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
@@ -1307,24 +1430,29 @@ COMPOSE_EOF
       - 'traefik.enable=true'
       - 'traefik.http.routers.traefik.rule=Host(`${DOMAIN_TRAEFIK}`)'
       - 'traefik.http.routers.traefik.service=api@internal'
-      - 'traefik.http.routers.traefik.middlewares=auth'
-      - 'traefik.http.middlewares.auth.basicauth.users=\${TRAEFIK_AUTH}' 
+      - 'traefik.http.routers.traefik.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}'
+      - 'traefik.http.routers.traefik.middlewares=redirect-to-dashboard,auth'
       - 'traefik.http.routers.traefik.tls.certresolver=${TRAEFIK_CERTRESOLVER_NAME}'
+      - 'traefik.http.middlewares.redirect-to-dashboard.redirectregex.regex=^https?://([^/]+)/?$$'
+      - 'traefik.http.middlewares.redirect-to-dashboard.redirectregex.replacement=https://$${1}/dashboard/'
+      - 'traefik.http.middlewares.redirect-to-dashboard.redirectregex.permanent=true'
+      - 'traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_AUTH}'
       - 'traefik.http.services.dummy-svc.loadbalancer.server.port=9999'
     deploy:
       mode: replicated
       replicas: 1
       placement:
-        constraints: 
+        constraints:
           - node.role == manager
       restart_policy:
         condition: on-failure
         delay: 5s
         max_attempts: 3
 TRAEFIK_EOF
+        fi
     fi
 
-    cat >> $INSTALL_DIR/docker-compose.yml <<'PORTAINER_EOF'
+    cat >> "$INSTALL_DIR/docker-compose.yml" <<'PORTAINER_EOF'
 
   portainer:
     image: portainer/portainer-ce:latest
@@ -1341,7 +1469,7 @@ TRAEFIK_EOF
           - node.role == manager
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.portainer.rule=Host(`${DOMAIN_PORTAINER}`)
         - traefik.http.routers.portainer.service=portainer
         - traefik.http.routers.portainer.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1364,19 +1492,7 @@ EOF
     else
         POSTGRES_PORTS_BLOCK=""
     fi
-    if [ "$ENABLE_EVOLUTION" = true ] || [ "$ENABLE_TYPEBOT" = true ]; then
-        POSTGRES_INIT_VOLUME="
-      - ./postgres-init:/docker-entrypoint-initdb.d:ro"
-        POSTGRES_EXTRA_ENV=""
-        [ "$ENABLE_EVOLUTION" = true ] && POSTGRES_EXTRA_ENV="${POSTGRES_EXTRA_ENV}
-      POSTGRES_EXTRA_EVO_PASS: \${PG_PASS_EVO}"
-        [ "$ENABLE_TYPEBOT" = true ] && POSTGRES_EXTRA_ENV="${POSTGRES_EXTRA_ENV}
-      POSTGRES_EXTRA_TYPEBOT_PASS: \${PG_PASS_TYPEBOT}"
-    else
-        POSTGRES_INIT_VOLUME=""
-        POSTGRES_EXTRA_ENV=""
-    fi
-    cat >> $INSTALL_DIR/docker-compose.yml <<PG_EOF
+    cat >> "$INSTALL_DIR/docker-compose.yml" <<PG_EOF
 
   postgres:
     image: postgres:16-alpine
@@ -1386,9 +1502,9 @@ ${POSTGRES_PORTS_BLOCK}
     environment:
       POSTGRES_DB: n8n
       POSTGRES_USER: n8n_user
-      POSTGRES_PASSWORD: \${PG_PASS_N8N}${POSTGRES_EXTRA_ENV}
+      POSTGRES_PASSWORD: ${PG_PASS_N8N}
     volumes:
-      - postgres_data:/var/lib/postgresql/data${POSTGRES_INIT_VOLUME}
+      - postgres_data:/var/lib/postgresql/data
     deploy:
       mode: replicated
       replicas: 1
@@ -1410,14 +1526,14 @@ EOF
     else
         REDIS_PORTS_BLOCK=""
     fi
-    cat >> $INSTALL_DIR/docker-compose.yml <<REDIS_EOF
+    cat >> "$INSTALL_DIR/docker-compose.yml" <<REDIS_EOF
 
   redis:
     image: redis:7-alpine
     networks: 
       - traefik-net
 ${REDIS_PORTS_BLOCK}
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASS}
     volumes:
       - redis_data:/data
     deploy:
@@ -1441,7 +1557,7 @@ EOF
     else
         MYSQL_PORTS_BLOCK=""
     fi
-    cat >> $INSTALL_DIR/docker-compose.yml <<MYSQL_EOF
+    cat >> "$INSTALL_DIR/docker-compose.yml" <<MYSQL_EOF
 
   mysql:
     image: mysql:8.0
@@ -1465,7 +1581,7 @@ ${MYSQL_PORTS_BLOCK}
 MYSQL_EOF
     }
 
-    [ "$ENABLE_MINIO" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'MINIO_EOF'
+    [ "$ENABLE_MINIO" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'MINIO_EOF'
 
   minio:
     image: minio/minio:latest
@@ -1491,7 +1607,7 @@ MYSQL_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.minio-api.rule=Host(`${DOMAIN_MINIO_API}`)
         - traefik.http.routers.minio-api.service=minio-api
         - traefik.http.routers.minio-api.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1506,7 +1622,7 @@ MYSQL_EOF
         condition: on-failure
 MINIO_EOF
 
-    [ "$ENABLE_N8N" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'N8N_EOF'
+    [ "$ENABLE_N8N" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'N8N_EOF'
 
   n8n_editor:
     image: n8nio/n8n:stable
@@ -1517,11 +1633,9 @@ MINIO_EOF
         published: ${N8N_EDITOR_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - n8n_data:/home/node/.n8n
     environment:
       - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
+      - DB_POSTGRESDB_HOST=${STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=n8n_user
@@ -1531,7 +1645,7 @@ MINIO_EOF
       - EXECUTIONS_MODE=queue
       - N8N_PROXY_HOPS=1
       - N8N_TRUST_PROXY=true
-      - QUEUE_BULL_REDIS_HOST=\${STACK_NAME}_redis
+      - QUEUE_BULL_REDIS_HOST=${STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -1559,7 +1673,7 @@ MINIO_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.n8n.rule=Host(`${DOMAIN_N8N}`)
         - traefik.http.routers.n8n.service=n8n
         - traefik.http.routers.n8n.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1577,11 +1691,9 @@ MINIO_EOF
         published: ${N8N_WEBHOOK_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - n8n_data:/home/node/.n8n
     environment:
       - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
+      - DB_POSTGRESDB_HOST=${STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=n8n_user
@@ -1591,7 +1703,7 @@ MINIO_EOF
       - EXECUTIONS_MODE=queue
       - N8N_PROXY_HOPS=1
       - N8N_TRUST_PROXY=true
-      - QUEUE_BULL_REDIS_HOST=\${STACK_NAME}_redis
+      - QUEUE_BULL_REDIS_HOST=${STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -1606,7 +1718,7 @@ MINIO_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.n8n-webhook.rule=Host(`${DOMAIN_N8N_WEBHOOK}`)
         - traefik.http.routers.n8n-webhook.service=n8n-webhook
         - traefik.http.routers.n8n-webhook.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1619,11 +1731,9 @@ MINIO_EOF
     image: n8nio/n8n:stable
     networks: 
       - traefik-net
-    volumes:
-      - n8n_data:/home/node/.n8n
     environment:
       - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
+      - DB_POSTGRESDB_HOST=${STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=n8n_user
@@ -1631,7 +1741,7 @@ MINIO_EOF
       - N8N_EDITOR_BASE_URL=https://${DOMAIN_N8N}
       - WEBHOOK_URL=https://${DOMAIN_N8N_WEBHOOK}
       - EXECUTIONS_MODE=queue
-      - QUEUE_BULL_REDIS_HOST=\${STACK_NAME}_redis
+      - QUEUE_BULL_REDIS_HOST=${STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -1659,7 +1769,7 @@ MINIO_EOF
         condition: on-failure
 N8N_EOF
 
-    [ "$ENABLE_EVOLUTION" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'EVO_EOF'
+    [ "$ENABLE_EVOLUTION" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'EVO_EOF'
 
   evolution:
     image: evoapicloud/evolution-api:v2.3.7
@@ -1670,22 +1780,19 @@ N8N_EOF
         published: ${EVOLUTION_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - evolution_data:/evolution/instances
     environment:
       SERVER_URL: https://${DOMAIN_EVOLUTION}
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
-      DATABASE_ENABLED: "true"
       DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: postgresql://evolution:\${PG_PASS_EVO}@\${STACK_NAME}_postgres:5432/evolution?schema=public
+      DATABASE_CONNECTION_URI: postgresql://evolution:${PG_PASS_EVO}@${STACK_NAME}_postgres:5432/evolution
       CACHE_REDIS_ENABLED: "true"
-      CACHE_REDIS_URI: redis://:\${REDIS_PASSWORD}@\${STACK_NAME}_redis:6379/1
+      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD}@${STACK_NAME}_redis:6379/1
     deploy:
       mode: replicated
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.evolution.rule=Host(`${DOMAIN_EVOLUTION}`)
         - traefik.http.routers.evolution.service=evolution
         - traefik.http.routers.evolution.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1695,7 +1802,7 @@ N8N_EOF
         condition: on-failure
 EVO_EOF
 
-    [ "$ENABLE_TYPEBOT" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'TYPEBOT_EOF'
+    [ "$ENABLE_TYPEBOT" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'TYPEBOT_EOF'
 
   typebot-builder:
     image: baptistearno/typebot-builder:latest
@@ -1706,10 +1813,8 @@ EVO_EOF
         published: ${TYPEBOT_BUILDER_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - typebot_data:/app/public/uploads
     environment:
-      DATABASE_URL: postgresql://typebot:\${PG_PASS_TYPEBOT}@\${STACK_NAME}_postgres:5432/typebot
+      DATABASE_URL: postgresql://typebot:${PG_PASS_TYPEBOT}@${STACK_NAME}_postgres:5432/typebot
       NEXTAUTH_URL: https://${DOMAIN_TYPEBOT}
       NEXT_PUBLIC_VIEWER_URL: https://${DOMAIN_TYPEBOT_VIEWER}
       ENCRYPTION_SECRET: ${TYPEBOT_ENC_KEY}
@@ -1724,7 +1829,7 @@ EVO_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.typebot.rule=Host(`${DOMAIN_TYPEBOT}`)
         - traefik.http.routers.typebot.service=typebot
         - traefik.http.routers.typebot.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1742,10 +1847,8 @@ EVO_EOF
         published: ${TYPEBOT_VIEWER_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - typebot_data:/app/public/uploads
     environment:
-      DATABASE_URL: postgresql://typebot:\${PG_PASS_TYPEBOT}@\${STACK_NAME}_postgres:5432/typebot
+      DATABASE_URL: postgresql://typebot:${PG_PASS_TYPEBOT}@${STACK_NAME}_postgres:5432/typebot
       NEXT_PUBLIC_VIEWER_URL: https://${DOMAIN_TYPEBOT_VIEWER}
       ENCRYPTION_SECRET: ${TYPEBOT_ENC_KEY}
     deploy:
@@ -1753,7 +1856,7 @@ EVO_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.typebot-viewer.rule=Host(`${DOMAIN_TYPEBOT_VIEWER}`)
         - traefik.http.routers.typebot-viewer.service=typebot-viewer
         - traefik.http.routers.typebot-viewer.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1763,7 +1866,7 @@ EVO_EOF
         condition: on-failure
 TYPEBOT_EOF
 
-    [ "$ENABLE_WORDPRESS" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'WP_EOF'
+    [ "$ENABLE_WORDPRESS" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'WP_EOF'
 
   wordpress:
     image: wordpress:latest
@@ -1774,10 +1877,8 @@ TYPEBOT_EOF
         published: ${WORDPRESS_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - wordpress_data:/var/www/html
     environment:
-      WORDPRESS_DB_HOST: \${STACK_NAME}_mysql
+      WORDPRESS_DB_HOST: ${STACK_NAME}_mysql
       WORDPRESS_DB_NAME: wordpress
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: ${WP_DB_PASS}
@@ -1786,7 +1887,7 @@ TYPEBOT_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.wordpress.rule=Host(`${DOMAIN_WORDPRESS}`)
         - traefik.http.routers.wordpress.service=wordpress
         - traefik.http.routers.wordpress.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1796,7 +1897,7 @@ TYPEBOT_EOF
         condition: on-failure
 WP_EOF
 
-    [ "$ENABLE_RABBIT" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'RABBIT_EOF'
+    [ "$ENABLE_RABBIT" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'RABBIT_EOF'
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
@@ -1811,8 +1912,6 @@ WP_EOF
         published: ${RABBIT_MGMT_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS}
@@ -1821,7 +1920,7 @@ WP_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.rabbit.rule=Host(`${DOMAIN_RABBIT}`)
         - traefik.http.routers.rabbit.service=rabbit
         - traefik.http.routers.rabbit.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1831,7 +1930,7 @@ WP_EOF
         condition: on-failure
 RABBIT_EOF
 
-    [ "$ENABLE_PGADMIN" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'PGADMIN_EOF'
+    [ "$ENABLE_PGADMIN" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'PGADMIN_EOF'
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -1842,8 +1941,6 @@ RABBIT_EOF
         published: ${PGADMIN_PUBLISHED_PORT}
         protocol: tcp
         mode: host
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: ${EMAIL_SSL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASS}
@@ -1852,7 +1949,7 @@ RABBIT_EOF
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.pgadmin.rule=Host(`${DOMAIN_PGADMIN}`)
         - traefik.http.routers.pgadmin.service=pgadmin
         - traefik.http.routers.pgadmin.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1862,7 +1959,7 @@ RABBIT_EOF
         condition: on-failure
 PGADMIN_EOF
 
-    [ "$ENABLE_PMA" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'PMA_EOF'
+    [ "$ENABLE_PMA" = true ] && cat >> "$INSTALL_DIR/docker-compose.yml" <<'PMA_EOF'
 
   phpmyadmin:
     image: phpmyadmin:latest
@@ -1874,14 +1971,14 @@ PGADMIN_EOF
         protocol: tcp
         mode: host
     environment:
-      PMA_HOST: \${STACK_NAME}_mysql
+      PMA_HOST: ${STACK_NAME}_mysql
       PMA_PORT: 3306
     deploy:
       mode: replicated
       replicas: 1
       labels:
         - traefik.enable=true
-        - traefik.swarm.network=${TRAEFIK_EXTERNAL_NETWORK}
+        - traefik.swarm.network=__TRAEFIK_NETWORK__
         - traefik.http.routers.pma.rule=Host(`${DOMAIN_PMA}`)
         - traefik.http.routers.pma.service=pma
         - traefik.http.routers.pma.entrypoints=${TRAEFIK_SECURE_ENTRYPOINT}
@@ -1890,6 +1987,18 @@ PGADMIN_EOF
       restart_policy:
         condition: on-failure
 PMA_EOF
+
+    # Rede no label: no deploy, usar sempre o nome da stack para bater com a rede real (evita "Could not find network named botinho_traefik-net")
+    if [ "$USE_EXISTING_TRAEFIK" = true ]; then
+        sed -i 's/__TRAEFIK_NETWORK__/${TRAEFIK_EXTERNAL_NETWORK}/g' "$INSTALL_DIR/docker-compose.yml"
+    else
+        sed -i 's/__TRAEFIK_NETWORK__/${STACK_NAME}_traefik-net/g' "$INSTALL_DIR/docker-compose.yml"
+    fi
+
+    # Certificado autoassinado: Traefik usa defaultCertificate; remover labels certresolver de todos os routers
+    if [ "$USE_SELF_SIGNED_CERT" = true ]; then
+        sed -i '/tls\.certresolver/d' "$INSTALL_DIR/docker-compose.yml"
+    fi
 
     log_info "docker-compose.yml gerado"
 }
@@ -1900,31 +2009,21 @@ deploy_stack() {
     echo -e "${CYAN}      IMPLANTANDO STACK${NC}"
     echo -e "${CYAN}══════════════════════════════════${NC}\n"
     
-    cd "$INSTALL_DIR" || { log_error "Diretório $INSTALL_DIR não encontrado."; exit 1; }
-    set +e
-    set -a
-    source .env 2>/dev/null
-    local _src_rc=$?
-    set -a
-    set -e
-    if [ $_src_rc -ne 0 ]; then
-        log_error "Erro ao carregar .env (verifique se o arquivo existe e a sintaxe)."
-        exit 1
-    fi
+    cd "$INSTALL_DIR" || { log_error "Diretório $INSTALL_DIR não acessível."; exit 1; }
+    [ ! -f ".env" ] && { log_error "Arquivo .env não encontrado em $INSTALL_DIR. Execute generate_files primeiro."; exit 1; }
+    [ ! -f "docker-compose.yml" ] && { log_error "Arquivo docker-compose.yml não encontrado em $INSTALL_DIR. Execute generate_files primeiro."; exit 1; }
+    set -a; source .env 2>/dev/null || true; set +a
 
-    # Variáveis obrigatórias para o compose (hostnames stack+serviço e rede Traefik)
     if [ -z "$STACK_NAME" ]; then
-        log_error "STACK_NAME vazio no .env. Serviços usam \${STACK_NAME}_postgres, \${STACK_NAME}_redis, etc."
+        log_error "STACK_NAME está vazio no .env. Edite $INSTALL_DIR/.env e defina STACK_NAME (ex: botinho), ou execute o instalador novamente."
         exit 1
     fi
-    if [ -z "$TRAEFIK_EXTERNAL_NETWORK" ]; then
-        if [ "$USE_EXISTING_TRAEFIK" = true ]; then
-            log_error "TRAEFIK_EXTERNAL_NETWORK vazio. Defina no .env a rede do proxy (ex: traefik-net)."
-        else
-            export TRAEFIK_EXTERNAL_NETWORK="${STACK_NAME}_traefik-net"
-            log_info "TRAEFIK_EXTERNAL_NETWORK definido: ${TRAEFIK_EXTERNAL_NETWORK}"
-        fi
-        [ -z "$TRAEFIK_EXTERNAL_NETWORK" ] && exit 1
+    export STACK_NAME
+
+    if [ "$USE_EXISTING_TRAEFIK" != true ] && [ "$USE_SELF_SIGNED_CERT" = true ]; then
+        [ ! -s "traefik/selfsigned.crt" ] && { log_error "Certificado traefik/selfsigned.crt não encontrado ou vazio. Execute o instalador novamente (generate_files)."; exit 1; }
+        [ ! -s "traefik/selfsigned.key" ] && { log_error "Chave traefik/selfsigned.key não encontrada ou vazia. Execute o instalador novamente (generate_files)."; exit 1; }
+        log_info "Certificados autoassinados encontrados para o Traefik."
     fi
 
     # Garantir que variáveis de domínio estão no ambiente (evita Host(``) e "no domain was given")
@@ -1975,7 +2074,7 @@ deploy_stack() {
                 log_warn "Conflito detectado na porta ${CONFLICT_PORT}. Remapeando automaticamente e reaplicando firewall..."
                 open_firewall_ports
                 generate_files
-                cd $INSTALL_DIR
+                cd "$INSTALL_DIR" || exit 1
                 set -a; source .env 2>/dev/null || true; set +a
                 ATTEMPT=$((ATTEMPT + 1))
                 continue
@@ -1986,7 +2085,8 @@ deploy_stack() {
 
     if [ "$DEPLOY_OK" != true ]; then
         log_error "Falha crítica no deploy!"
-        echo -e "${YELLOW}Veja os detalhes técnicos em:${NC} ${WHITE}${DEPLOY_RAW_LOG}${NC}"
+        show_deploy_failure_reason "$DEPLOY_RAW_LOG"
+        echo -e "${YELLOW}Log completo:${NC} ${WHITE}${DEPLOY_RAW_LOG}${NC}"
         exit 1
     fi
     
@@ -1994,22 +2094,31 @@ deploy_stack() {
     
     if [ "$NEED_POSTGRES" = true ]; then
         echo -e "\n${CYAN}Verificando Banco de Dados...${NC}"
-        sleep 10
-        PG_CONTAINER=$(docker ps -q -f name="${STACK_NAME}_postgres" | head -n1)
+        PG_CONTAINER=""
+        for _ in $(seq 1 30); do
+            PG_CONTAINER=$(docker ps -q -f name="${STACK_NAME}_postgres" -f status=running 2>/dev/null | head -n1)
+            [ -n "$PG_CONTAINER" ] && break
+            sleep 2
+        done
         if [ -n "$PG_CONTAINER" ]; then
-            log_info "Criando bancos adicionais se necessário (fallback para volume já existente)..."
-            [ "$ENABLE_EVOLUTION" = true ] && {
-                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE USER evolution WITH PASSWORD '$PG_PASS_EVO';" 2>/dev/null || true
-                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
-            }
-            [ "$ENABLE_TYPEBOT" = true ] && {
-                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE USER typebot WITH PASSWORD '$PG_PASS_TYPEBOT';" 2>/dev/null || true
-                docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
-            }
+            for _ in $(seq 1 15); do
+                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "SELECT 1" >/dev/null 2>&1 && break
+                sleep 2
+            done
+            log_info "Criando bancos adicionais (evolution, typebot) se necessário..."
+            if [ "$ENABLE_EVOLUTION" = true ]; then
+                EVO_PASS_SQL="${PG_PASS_EVO//\'/\'\'}"
+                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE USER evolution WITH PASSWORD '${EVO_PASS_SQL}';" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
+            fi
+            if [ "$ENABLE_TYPEBOT" = true ]; then
+                TB_PASS_SQL="${PG_PASS_TYPEBOT//\'/\'\'}"
+                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE USER typebot WITH PASSWORD '${TB_PASS_SQL}';" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
+            fi
+        else
+            log_warn "Container PostgreSQL da stack ${STACK_NAME} não encontrado; crie os usuários/bancos evolution e typebot manualmente se precisar."
         fi
-        # Reinicia Evolution/Typebot para reconectar aos bancos (útil quando init não rodou, ex.: volume já existia)
-        [ "$ENABLE_EVOLUTION" = true ] && docker service update --force "${STACK_NAME}_evolution" 2>/dev/null || true
-        [ "$ENABLE_TYPEBOT" = true ] && { docker service update --force "${STACK_NAME}_typebot-builder" 2>/dev/null || true; docker service update --force "${STACK_NAME}_typebot-viewer" 2>/dev/null || true; }
     fi
     
     log_info "Stack implantada com sucesso!"
@@ -2033,11 +2142,11 @@ LOG="/var/log/twobrain-maintenance.log"
 echo "=== TWOBRAIN Maintenance - $(date) ===" >> "$LOG"
 
 # Limpeza de memória cache
-FREE_MEM=\$(awk '/^MemAvailable:/{a=\$2} /^MemTotal:/{t=\$2} END{print int(100*a/t)}' /proc/meminfo 2>/dev/null || echo "50")
-[ "\${FREE_MEM:-50}" -lt 20 ] 2>/dev/null && {
+FREE_MEM=$(awk '/^MemAvailable:/{a=$2} /^MemTotal:/{t=$2} END{print int(100*a/t)}' /proc/meminfo)
+if [ "$FREE_MEM" -lt 20 ]; then
     sync; echo 3 > /proc/sys/vm/drop_caches
-    echo "  Cache limpo" >> "\$LOG"
-}
+    echo "  Cache limpo" >> "$LOG"
+fi
 
 # Limpeza Docker
 docker system prune -af --filter "until=24h" >> "$LOG" 2>&1
@@ -2100,15 +2209,13 @@ generate_report() {
     if [ "$USE_EXISTING_TRAEFIK" = true ]; then
         echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Usando Traefik/Coolify existente${NC} (stack sem serviço Traefik)"
         echo -e "${GREEN}✓${NC} Rede proxy: ${WHITE}${TRAEFIK_EXTERNAL_NETWORK}${NC}"
-        echo -e "${GREEN}✓${NC} Comunicação interna: hostnames ${WHITE}\${STACK_NAME}_<serviço>${NC} (ex: ${STACK_NAME}_postgres, ${STACK_NAME}_redis)"
     elif [ "$TRAEFIK_ALT_PORTS" = true ]; then
         echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Traefik em portas 8081 (HTTP) e 8444 (HTTPS)${NC}"
         echo -e "${GREEN}✓${NC} Rede da stack: ${WHITE}${STACK_NAME}_traefik-net${NC}"
-        echo -e "${GREEN}✓${NC} Comunicação interna: hostnames ${WHITE}\${STACK_NAME}_<serviço>${NC}"
     else
         echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Traefik próprio em 80/443${NC}"
         echo -e "${GREEN}✓${NC} Rede da stack: ${WHITE}${STACK_NAME}_traefik-net${NC}"
-        echo -e "${GREEN}✓${NC} Comunicação interna: hostnames ${WHITE}\${STACK_NAME}_<serviço>${NC} (ex: ${STACK_NAME}_postgres)"
+        [ "$USE_SELF_SIGNED_CERT" = true ] && echo -e "${GREEN}✓${NC} SSL: ${WHITE}Certificado autoassinado${NC} (navegador pode exibir aviso)"
     fi
     echo ""
     
@@ -2141,41 +2248,20 @@ generate_report() {
     echo -e "  • Senha definida no primeiro acesso\n"
 
     if [ "$USE_EXISTING_TRAEFIK" != true ]; then
-        echo -e "${WHITE}Traefik Dashboard${NC}: https://$DOMAIN_TRAEFIK"
+        echo -e "${WHITE}Traefik Dashboard${NC}: https://$DOMAIN_TRAEFIK  (ou https://$DOMAIN_TRAEFIK/dashboard/ ; usuário/senha do passo de autenticação)"
         echo -e "  • Usuário: ${WHITE}admin${NC}"
         echo -e "  • Senha:   ${WHITE}$TRAEFIK_PASS${NC}\n"
     fi
 
     [ "$ENABLE_MINIO" = true ] && {
         echo -e "${WHITE}MinIO Console${NC}: https://$DOMAIN_MINIO_CONSOLE"
-        echo -e "  • API S3:  ${WHITE}https://$DOMAIN_MINIO_API${NC}"
         echo -e "  • Usuário: ${WHITE}$MINIO_ROOT_USER${NC}"
         echo -e "  • Senha:   ${WHITE}$MINIO_ROOT_PASSWORD${NC}\n"
     }
 
-    [ "$ENABLE_N8N" = true ] && {
-        echo -e "${WHITE}N8N${NC}: https://$DOMAIN_N8N"
-        echo -e "  • Webhook: ${WHITE}https://$DOMAIN_N8N_WEBHOOK${NC}"
-        echo -e "  • Senha/usuário definidos no primeiro acesso"
-        echo -e "  • Chave criptografia (backup): ${WHITE}$N8N_KEY${NC}\n"
-    }
-
-    [ "$ENABLE_TYPEBOT" = true ] && {
-        echo -e "${WHITE}Typebot Builder${NC}: https://$DOMAIN_TYPEBOT"
-        echo -e "  • Viewer:  ${WHITE}https://$DOMAIN_TYPEBOT_VIEWER${NC}"
-        echo -e "  • Admin (login): ${WHITE}$EMAIL_SSL${NC}"
-        echo -e "  • ENCRYPTION_SECRET (backup): ${WHITE}$TYPEBOT_ENC_KEY${NC}\n"
-    }
-
     [ "$ENABLE_EVOLUTION" = true ] && {
         echo -e "${WHITE}Evolution API${NC}: https://$DOMAIN_EVOLUTION"
-        echo -e "  • API Key (Header Authorization): ${WHITE}$EVO_API_KEY${NC}\n"
-    }
-
-    [ "$ENABLE_WORDPRESS" = true ] && {
-        echo -e "${WHITE}WordPress${NC}: https://$DOMAIN_WORDPRESS"
-        echo -e "  • Instalação e senha de admin no primeiro acesso"
-        echo -e "  • DB: ${WHITE}wordpress${NC} | User: ${WHITE}wordpress${NC} | Pass: ${WHITE}$WP_DB_PASS${NC}\n"
+        echo -e "  • API Key: ${WHITE}$EVO_API_KEY${NC}\n"
     }
 
     [ "$ENABLE_RABBIT" = true ] && {
@@ -2235,7 +2321,7 @@ generate_report() {
     
     echo -e "${CYAN}📁 ARQUIVOS${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  Config (todas as variáveis): ${WHITE}$INSTALL_DIR/.env${NC}"
+    echo -e "  Config: ${WHITE}$INSTALL_DIR/.env${NC}"
     echo -e "  Compose: ${WHITE}$INSTALL_DIR/docker-compose.yml${NC}"
     echo -e "  Tutorial Cloudflare + portas: ${WHITE}$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt${NC}"
     echo -e "  Manutenção: ${WHITE}/usr/local/bin/twobrain-maintenance.sh${NC}"
@@ -2250,6 +2336,7 @@ generate_report() {
         PORTS_CSV="${PORTS_CSV:+${PORTS_CSV}, }${port}"
     done
     echo -e "  No painel da VPS/cloud, libere: ${WHITE}TCP ${PORTS_CSV}${NC}"
+    echo -e "  ${YELLOW}Se certificados falharem com \"Timeout during connect\": libere TCP 80 e 443 no firewall do PROVEDOR (não só no servidor).${NC}"
     echo -e "  Cloudflare: SSL ${WHITE}Full${NC} ou ${WHITE}Full (strict)${NC}; Proxy ${WHITE}laranja${NC} (Proxied) ou cinza (DNS only)"
     echo -e "  Tutorial completo: ${WHITE}$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt${NC}\n"
     
@@ -2269,11 +2356,16 @@ generate_report() {
         echo -e "2. Ou configure DNS (Tipo A) para ${WHITE}${SERVER_IP}${NC} e use o proxy existente para rotear por host."
     else
         echo -e "1. No Cloudflare: proxy laranja (Proxied) ou cinza (DNS only); SSL Full ou Full (strict)"
-        echo -e "2. No painel da VPS/cloud: libere ${WHITE}TCP ${PORTS_CSV}${NC} (sem isso não há autenticação/acesso)"
+        echo -e "2. No painel da VPS/cloud: libere ${WHITE}TCP ${PORTS_CSV}${NC} (obrigatório: sem 80/443 o Let's Encrypt não emite certificados)"
         echo -e "3. Configure os registros DNS acima apontando para ${WHITE}${SERVER_IP}${NC}"
         [ "$TRAEFIK_ALT_PORTS" = true ] && echo -e "   ${YELLOW}Acesso direto (portas alt): http://${SERVER_IP}:${TRAEFIK_HTTP_PORT} e https://${SERVER_IP}:${TRAEFIK_HTTPS_PORT}${NC}"
     fi
-    echo -e "4. Aguarde 2-5 min para os serviços subirem; até 10 min para certificados SSL"
+    echo -e "4. Aguarde 2-5 min para os serviços subirem"
+    if [ "$USE_SELF_SIGNED_CERT" = true ]; then
+        echo -e "   ${YELLOW}Certificado autoassinado: HTTPS já funciona; o navegador pode pedir que você aceite o aviso de segurança.${NC}"
+    else
+        echo -e "   Até 10 min para certificados Let's Encrypt. ${YELLOW}Erro \"Timeout during connect\" = porta 80 inacessível (liberar no painel do provedor).${NC}"
+    fi
     echo -e "5. Teste: ${WHITE}https://$DOMAIN_PORTAINER${NC}\n"
 
     echo -e "${CYAN}🧱 INFORMAÇÕES BRUTAS (DEBUG)${NC}"
@@ -2283,7 +2375,12 @@ generate_report() {
     if [ "$USE_EXISTING_TRAEFIK" != true ]; then
         echo -e "  Logs proxy: ${WHITE}docker service logs -f ${STACK_NAME}_traefik${NC}"
     fi
-    echo -e "  Acme:       ${WHITE}$INSTALL_DIR/traefik/acme.json${NC}\n"
+    if [ "$USE_SELF_SIGNED_CERT" = true ]; then
+        echo -e "  Certificado: ${WHITE}$INSTALL_DIR/traefik/selfsigned.crt${NC} (e .key)"
+    else
+        echo -e "  Acme:       ${WHITE}$INSTALL_DIR/traefik/acme.json${NC}"
+    fi
+    echo ""
     if [ "$EXPOSE_DB_PORTS" != true ]; then
         echo -e "${YELLOW}Observação:${NC} portas de banco não foram expostas no host (modo integração)."
         echo -e "Acesso aos bancos deve ser via rede interna Docker/Swarm.\n"
